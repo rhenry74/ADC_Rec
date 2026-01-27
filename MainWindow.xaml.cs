@@ -1,0 +1,667 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices.WindowsRuntime;
+using System.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
+using Windows.Foundation;
+using Windows.Foundation.Collections;
+
+// To learn more about WinUI, the WinUI project structure,
+// and more about our project templates, see: http://aka.ms/winui-project-info.
+
+namespace ADC_Rec
+{
+    /// <summary>
+    /// An empty window that can be used on its own or navigated to within a Frame.
+    /// </summary>
+    public sealed partial class MainWindow : Window
+    {
+        private Services.SerialService _serialService;
+        private Services.Parser _parser;
+        private Managers.PlotManager _plotManager;
+        private bool _running = false;
+
+        // Incoming packet queue and timer for batched UI updates
+        private readonly System.Collections.Concurrent.ConcurrentQueue<Models.Packet> _packetQueue = new System.Collections.Concurrent.ConcurrentQueue<Models.Packet>();
+        private volatile int _pendingPacketCount = 0;
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        private System.Threading.Timer? _uiTimer = null;
+        private System.Threading.Timer? _counterTimer = null; // updates bytes-per-channel UI every 200ms
+        private double _cpuFreq = 240000000.0;
+        private double _rampSlope = 1.0;
+        private int _displayWindowSamples = 48000; // default 1s
+        private int _sampleRate = 48000; // default sample rate
+        private int _plotBits = 16; // default plot bits (user-selectable)
+        private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
+        private const int MaxPacketBatchPerTick = 64;
+        private const int MaxPacketQueue = 4096; // if exceeded, drop oldest packets to keep memory bounded
+        private int _lastLogFlushTick = Environment.TickCount;
+        private const int LogFlushMs = 500;
+
+        // Reusable display buffers to avoid allocations
+        private float[][] _displayBuffers = new float[Models.Packet.NumChannels][];
+        private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
+        private long[] _bytesPerChannel = new long[Models.Packet.NumChannels]; // parsed bytes per channel (cumulative)
+
+        public MainWindow()
+        {
+            InitializeComponent();
+
+            _serialService = new Services.SerialService();
+            _serialService.DataReceived += SerialService_DataReceived;
+            _serialService.LogMessage += (s) => AddLog(s);
+
+            _parser = new Services.Parser();
+            _parser.PacketParsed += Parser_PacketParsed;
+            _parser.DebugLine += (s) => { if (_parser.Verbose) AddLog("[DBG] " + s); };
+
+            _plotManager = new Managers.PlotManager(48000); // 1 s history default
+
+            // initialize UI-driven conversion parameters
+            double.TryParse(CpuFreqTextBox.Text, out _cpuFreq);
+            double.TryParse(RampSlopeTextBox.Text, out _rampSlope);
+            CpuFreqTextBox.TextChanged += (s, e) => { double.TryParse(CpuFreqTextBox.Text, out _cpuFreq); };
+            RampSlopeTextBox.TextChanged += (s, e) => { double.TryParse(RampSlopeTextBox.Text, out _rampSlope); };
+
+            // prepare display buffers
+            for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _displayBuffers[ch] = new float[_displayWindowSamples];
+            // prepare raw display buffers used by hover tooltips
+            for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _displayRawBuffers[ch] = new uint[_displayWindowSamples];
+            // initialize counters and counter timer (stopped until capture starts)
+            for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _bytesPerChannel[ch] = 0;
+            _counterTimer = new System.Threading.Timer(_ => UpdateBytesUi(), null, Timeout.Infinite, 200);
+            // Plot bits combo hookup (if exists)
+            if (PlotBitsCombo != null)
+            {
+                PlotBitsCombo.SelectionChanged += PlotBitsCombo_SelectionChanged;
+                // ensure default selection reflects _plotBits
+                _ = DispatcherQueue.TryEnqueue(() => { foreach (var it in PlotBitsCombo.Items) if (it is ComboBoxItem c && c.Content?.ToString() == _plotBits.ToString()) PlotBitsCombo.SelectedItem = it; });
+            }
+
+            // Fit-to-data checkbox hookup (if exists)
+            if (FitToDataCheck != null)
+            {
+                FitToDataCheck.IsChecked = _fitToData;
+                FitToDataCheck.Checked += (s, e) => { _fitToData = true; _logQueue.Enqueue("Fit to data: ON"); };
+                FitToDataCheck.Unchecked += (s, e) => { _fitToData = false; _logQueue.Enqueue("Fit to data: OFF"); };
+            }
+
+            // Verbose checkbox hookup (if exists)
+            if (VerboseCheckbox != null)
+            {
+                VerboseCheckbox.IsChecked = false;
+                VerboseCheckbox.Checked += (s, e) => { _parser.Verbose = true; _logQueue.Enqueue("Verbose ON"); };
+                VerboseCheckbox.Unchecked += (s, e) => { _parser.Verbose = false; _logQueue.Enqueue("Verbose OFF"); };
+            }
+
+            // Show hover/last-value labels all the time (initialize)
+            try
+            {
+                if (HoverText0 != null) { HoverText0.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText0.Text = "<no data>"; }
+                if (HoverText1 != null) { HoverText1.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText1.Text = "<no data>"; }
+                if (HoverText2 != null) { HoverText2.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText2.Text = "<no data>"; }
+                if (HoverText3 != null) { HoverText3.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText3.Text = "<no data>"; }
+            }
+            catch { }
+
+            this.Activated += MainWindow_Activated;
+            this.Closed += MainWindow_Closed;
+        }
+
+        private void MainWindow_Activated(object sender, Microsoft.UI.Xaml.WindowActivatedEventArgs e)
+        {
+            // Activated may be called multiple times; refresh ports when activated initially
+            RefreshPorts();
+        }
+
+        private void MainWindow_Closed(object sender, Microsoft.UI.Xaml.WindowEventArgs args)
+        {
+            _serialService?.Dispose();
+            try { _counterTimer?.Change(Timeout.Infinite, Timeout.Infinite); _counterTimer?.Dispose(); _counterTimer = null; } catch { }
+        }
+
+        private void RefreshPorts()
+        {
+            try
+            {
+                var ports = _serialService.GetPortNames();
+                PortComboBox.ItemsSource = ports;
+                if (ports.Length > 0) PortComboBox.SelectedIndex = 0;
+                AddLog($"Found ports: {string.Join(",", ports)}");
+            }
+            catch (Exception ex)
+            {
+                AddLog("Error listing ports: " + ex.Message);
+            }
+        }
+
+        private void AddLog(string s)
+        {
+            // Queue log lines and let UI flush them periodically to avoid flooding the dispatcher
+            _logQueue.Enqueue(s);
+        }
+
+        private void SerialService_DataReceived(byte[] data)
+        {
+            if (!_running) return;
+            _parser.Feed(data);
+        }
+
+
+
+        private void Parser_PacketParsed(Models.Packet pkt)
+        {
+            // Enqueue packets quickly for batch processing on UI timer
+            _packetQueue.Enqueue(pkt);
+            System.Threading.Interlocked.Increment(ref _pendingPacketCount);
+
+            // Track parsed bytes per channel (each sample is 3 bytes)
+            for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+            {
+                System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 3);
+            }
+        }
+
+        private void ProcessPendingPackets()
+        {
+            if (System.Threading.Interlocked.Add(ref _pendingPacketCount, 0) == 0) return;
+
+            // read conversion parameters on UI thread (safely)
+            _ = DispatcherQueue.TryEnqueue(() =>
+            {
+                double.TryParse(CpuFreqTextBox.Text, out _cpuFreq);
+                double.TryParse(RampSlopeTextBox.Text, out _rampSlope);
+            });
+
+            float voltsPerCycle = (float)(_rampSlope / Math.Max(1.0, _cpuFreq));
+
+            // Drop oldest if queue is massive
+            try
+            {
+                int qCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+                if (qCount > MaxPacketQueue)
+                {
+                    int toDrop = qCount - MaxPacketQueue;
+                    for (int i = 0; i < toDrop; i++)
+                    {
+                        if (_packetQueue.TryDequeue(out _)) System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                        else break;
+                    }
+                    _logQueue.Enqueue($"Packet queue full, dropped {toDrop} packets");
+                }
+            }
+            catch { }
+
+            var batch = new List<Models.Packet>(MaxPacketBatchPerTick);
+            for (int i = 0; i < MaxPacketBatchPerTick; i++)
+            {
+                if (_packetQueue.TryDequeue(out var p))
+                {
+                    batch.Add(p);
+                    System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                }
+                else break;
+            }
+            if (batch.Count == 0)
+            {
+                if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
+                return;
+            }
+
+            _plotManager.AddPacketsBatch(batch, voltsPerCycle, _plotBits);
+
+            // Verbose diagnostics only when enabled: compute min/max and enqueue as logs
+            if (_parser.Verbose)
+            {
+                double[] chMin = new double[Models.Packet.NumChannels];
+                double[] chMax = new double[Models.Packet.NumChannels];
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++) { chMin[ch] = double.MaxValue; chMax[ch] = double.MinValue; }
+                foreach (var pkt in batch)
+                {
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    {
+                        for (int i = 0; i < Models.Packet.BufferLen; i++)
+                        {
+                            // compute scaled integer for stats using the selected plot bits
+                            double raw24 = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                            int shift = Math.Max(0, 24 - Math.Max(1, Math.Min(24, _plotBits)));
+                            double scaled = Math.Floor(raw24 / Math.Pow(2, shift));
+                            double v = scaled; // plotted as integer units
+                            if (v < chMin[ch]) chMin[ch] = v;
+                            if (v > chMax[ch]) chMax[ch] = v;
+                        }
+                    }
+                }
+
+                string stats = "Batch stats:";
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++) stats += $" ch{ch} min={chMin[ch]:G6} max={chMax[ch]:G6};";
+                _logQueue.Enqueue(stats);
+
+                var p0 = batch[0];
+                string snap = "First pkt samples:";
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    snap += $" ch{ch}=";
+                    for (int i = 0; i < Models.Packet.BufferLen; i++) snap += $"{p0.Samples[ch, i]} ";
+                }
+                _logQueue.Enqueue(snap);
+            }
+
+            // trigger single UI update (fill display buffers then draw) and flush logs occasionally
+            _ = DispatcherQueue.TryEnqueue(() =>
+            {
+                bool anyDrawn = false;
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                    var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                    DrawChannel(canvas, _displayBuffers[ch], n);
+                    if (n > 0) anyDrawn = true;
+                }
+
+                // Update per-channel latest raw sample display (always show most recent sample as hex)
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    var tmpRaw = new uint[1];
+                    int a = _plotManager.FillChannelRawSnapshot(ch, tmpRaw, 1);
+                    string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({(tmpRaw[0] >> Math.Max(0, 24 - _plotBits))})" : "<no data>";
+                    if (ch == 0) HoverText0.Text = txt;
+                    else if (ch == 1) HoverText1.Text = txt;
+                    else if (ch == 2) HoverText2.Text = txt;
+                    else HoverText3.Text = txt;
+                }
+
+                if (!anyDrawn)
+                {
+                    var sbCounts = new System.Text.StringBuilder();
+                    sbCounts.Append("Plot counts:");
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++) sbCounts.Append($" ch{ch}={_plotManager.GetAvailableSamples(ch)}");
+                    _logQueue.Enqueue(sbCounts.ToString());
+                }
+
+                if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
+            });
+        }
+
+        private void FlushLogsAndUpdateQueueStatus()
+        {
+            int now = Environment.TickCount;
+            // Only flush logs at most every LogFlushMs
+            if (now - _lastLogFlushTick < LogFlushMs) return;
+
+            const int MaxFlush = 500;
+            var sb = new System.Text.StringBuilder();
+            int flushed = 0;
+            for (int i = 0; i < MaxFlush; i++)
+            {
+                if (_logQueue.TryDequeue(out var s))
+                {
+                    sb.AppendLine(s);
+                    flushed++;
+                }
+                else break;
+            }
+
+            if (flushed > 0)
+            {
+                const int MaxChars = 200_000;
+                string add = sb.ToString();
+                string t = (LogTextBox.Text ?? string.Empty) + add;
+                if (t.Length > MaxChars) t = t.Substring(t.Length - MaxChars);
+                LogTextBox.Text = t;
+                LogTextBox.SelectionStart = t.Length;
+                LogTextBox.SelectionLength = 0;
+            }
+
+            // update queue count display
+            try { QueueTextBlock.Text = $"Queue: {System.Threading.Interlocked.Add(ref _pendingPacketCount, 0)}"; } catch { }
+
+            _lastLogFlushTick = now;
+        }
+
+        private void DisplayWindowCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (DisplayWindowCombo.SelectedItem is ComboBoxItem item && int.TryParse(item.Content?.ToString(), out int ms))
+                {
+                    _displayWindowSamples = Math.Max(16, ms * _sampleRate / 1000);
+                    // resize display buffers if needed
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    {
+                        if (_displayBuffers[ch] == null || _displayBuffers[ch].Length < _displayWindowSamples)
+                        {
+                            _displayBuffers[ch] = new float[_displayWindowSamples];
+                        }
+                        if (_displayRawBuffers[ch] == null || _displayRawBuffers[ch].Length < _displayWindowSamples)
+                        {
+                            _displayRawBuffers[ch] = new uint[_displayWindowSamples];
+                        }
+                    }
+                    _logQueue.Enqueue($"Display window set to {ms} ms ({_displayWindowSamples} samples)");
+                }
+            }
+            catch { }
+        }
+
+        private void PlotBitsCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (PlotBitsCombo.SelectedItem is ComboBoxItem item && int.TryParse(item.Content?.ToString(), out int bits))
+                {
+                    _plotBits = Math.Max(1, Math.Min(24, bits));
+                    _logQueue.Enqueue($"Plot bits set to {_plotBits}");
+                    // Rescale historical buffers so old data reflects the new bit interpretation
+                    _plotManager.RescaleBuffers(_plotBits);
+                    // Force an immediate display refresh so change is visible right away
+                    _ = DispatcherQueue.TryEnqueue(() => {
+                        for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                        {
+                            int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                            var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                            DrawChannel(canvas, _displayBuffers[ch], n);
+                        }
+                    });
+                }
+            }
+            catch { }
+        }
+
+        private void StartUiTimer()
+        {
+            if (_uiTimer != null) return; // already running
+            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 33); // ~30Hz
+        }
+
+        private void StopUiTimer()
+        {
+            if (_uiTimer == null) return;
+            _uiTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            _uiTimer.Dispose();
+            _uiTimer = null;
+        }
+
+        private void DrawChannel(Canvas canvas, float[] samples, int length)
+        {
+            try
+            {
+                canvas.Children.Clear();
+                if (samples == null || length <= 0) return;
+
+                double w = canvas.ActualWidth;
+                double h = canvas.ActualHeight;
+                if (w <= 0) w = canvas.Width > 0 ? canvas.Width : 600;
+                if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
+
+                float min, max;
+                if (_fitToData)
+                {
+                    // autoscale to snapshot data range (no symmetric offset)
+                    min = float.MaxValue; max = float.MinValue;
+                    for (int i = 0; i < length; i++)
+                    {
+                        float v = samples[i];
+                        if (v < min) min = v;
+                        if (v > max) max = v;
+                    }
+                    if (min == float.MaxValue || max == float.MinValue) { min = 0f; max = 1f; }
+                    // add a tiny padding so flat lines are visible
+                    if (Math.Abs(max - min) < 1e-6f) { max = min + 1f; }
+                }
+                else
+                {
+                    // Use a fixed plotting range based on selected bit depth: [0 .. (2^bits - 1)]
+                    min = 0f;
+                    max = (float)(((1u << Math.Max(1, Math.Min(24, _plotBits))) - 1));
+                }
+                float range = max - min;
+                if (range <= 0f) range = 1f; // fall back to sensible range to avoid div0
+
+                // Decimate to canvas width using min/max per bucket
+                int n = length;
+                int pixelWidth = (int)w;
+                if (pixelWidth < 16) pixelWidth = 16;
+                int buckets = Math.Min(pixelWidth, n);
+                double bucketSize = (double)n / buckets;
+
+                var poly = new Microsoft.UI.Xaml.Shapes.Polyline
+                {
+                    Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Lime),
+                    StrokeThickness = 1
+                };
+                var pts = new Microsoft.UI.Xaml.Media.PointCollection();
+
+                for (int b = 0; b < buckets; b++)
+                {
+                    int s = (int)Math.Floor(b * bucketSize);
+                    int e = (int)Math.Floor((b + 1) * bucketSize) - 1;
+                    if (e < s) e = s;
+                    float bmin = float.MaxValue, bmax = float.MinValue;
+                    for (int k = s; k <= e && k < n; k++)
+                    {
+                        float v = samples[k];
+                        if (v < bmin) bmin = v;
+                        if (v > bmax) bmax = v;
+                    }
+                    double x = (double)b / (buckets - 1) * w;
+                    double y1 = h - ((bmin - min) / range) * h;
+                    double y2 = h - ((bmax - min) / range) * h;
+                    // push min then max to show envelope
+                    pts.Add(new Windows.Foundation.Point(x, y1));
+                    pts.Add(new Windows.Foundation.Point(x, y2));
+                }
+
+                poly.Points = pts;
+
+                // Draw zero baseline if zero lies within visible range (helps to see offset)
+                if (min <= 0 && max >= 0)
+                {
+                    double y0 = h - ((0 - min) / range) * h;
+                    var baseline = new Microsoft.UI.Xaml.Shapes.Line
+                    {
+                        X1 = 0,
+                        Y1 = y0,
+                        X2 = w,
+                        Y2 = y0,
+                        Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.DimGray),
+                        StrokeThickness = 1
+                    };
+                    canvas.Children.Add(baseline);
+                }
+
+                canvas.Children.Add(poly);
+
+                // Draw a small red dot at the most recent sample (helps detect scrolling)
+                if (length > 0)
+                {
+                    float last = samples[length - 1];
+                    double xLast = w; // most recent sample drawn at right edge
+                    double yLast = h - ((last - min) / range) * h;
+                    var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
+                    {
+                        Width = 4,
+                        Height = 4,
+                        Fill = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Red)
+                    };
+                    Canvas.SetLeft(dot, Math.Max(0, xLast - 2));
+                    Canvas.SetTop(dot, Math.Max(0, yLast - 2));
+                    canvas.Children.Add(dot);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog("Draw error: " + ex.Message);
+            }
+        }
+
+        private void ConnectButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (PortComboBox.SelectedItem == null)
+            {
+                AddLog("No port selected");
+                return;
+            }
+            string? port = PortComboBox.SelectedItem?.ToString();
+            if (string.IsNullOrWhiteSpace(port)) { AddLog("Invalid port selected"); return; }
+            bool ok = _serialService.Connect(port);
+            _ = DispatcherQueue.TryEnqueue(() => { StatusTextBlock.Text = ok ? $"Connected {port}" : $"Connect failed {port}"; });
+        }
+
+        private void DumpButton_Click(object sender, RoutedEventArgs e)
+        {
+            // If there's a pending parsed packet, dequeue it and dump its raw bytes (header + payload)
+            if (_packetQueue.TryDequeue(out var pkt))
+            {
+                System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                int payloadLen = Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
+                int totalLen = 2 + payloadLen;
+                _logQueue.Enqueue($"Packet dump (raw {totalLen} bytes):");
+                // Header bytes on their own line
+                _logQueue.Enqueue("0x55,0xAA,");
+                // Per-channel samples (3 bytes LSB-first) with integer value shown
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    for (int i = 0; i < Models.Packet.BufferLen; i++)
+                    {
+                        uint v = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                        byte b0 = (byte)(v & 0xFF);
+                        byte b1 = (byte)((v >> 8) & 0xFF);
+                        byte b2 = (byte)((v >> 16) & 0xFF);
+                        _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2},0x{b2:X2}, = CH{ch}, {v}");
+                    }
+                    // separator line between channels for readability
+                    _logQueue.Enqueue(string.Empty);
+                }
+                return;
+            }
+
+            // Fallback: Dump a compact textual snapshot of recent samples for each channel
+            _ = DispatcherQueue.TryEnqueue(() =>
+            {
+                int dumpSamples = Math.Min(128, _displayWindowSamples);
+                AddLog($"Dumping last {dumpSamples} samples per channel (most recent last):");
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    var tmp = new float[dumpSamples];
+                    int avail = _plotManager.FillChannelSnapshot(ch, tmp, dumpSamples);
+                    if (avail == 0) { _logQueue.Enqueue($"ch{ch}: <no data>"); continue; }
+                    var sb = new System.Text.StringBuilder();
+                    sb.Append($"ch{ch}: ");
+                    for (int i = 0; i < avail; i++)
+                    {
+                        sb.Append(tmp[i].ToString("G6"));
+                        if (i + 1 < avail) sb.Append(',');
+                    }
+                    _logQueue.Enqueue(sb.ToString());
+                }
+            });
+        }
+
+        private void CopyLogsButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (LogTextBox == null) return;
+            try
+            {
+                var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                dp.SetText(LogTextBox.Text ?? string.Empty);
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
+                AddLog("Logs copied to clipboard");
+            }
+            catch (Exception ex)
+            {
+                AddLog("Copy error: " + ex.Message);
+            }
+        }
+
+        private void UpdateBytesUi()
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    long v = System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], 0);
+                    sb.Append($" ch{ch}={v}");
+                }
+                _ = DispatcherQueue.TryEnqueue(() => { BytesTextBlock.Text = "Bytes:" + sb.ToString(); });
+            }
+            catch { }
+        }
+
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Clear plotted data, queues, logs, and counters
+            _plotManager.Clear();
+
+            // clear pending packet queue and counters
+            while (_packetQueue.TryDequeue(out _)) { }
+            System.Threading.Interlocked.Exchange(ref _pendingPacketCount, 0);
+
+            // reset bytes counters
+            for (int ch = 0; ch < Models.Packet.NumChannels; ch++) System.Threading.Interlocked.Exchange(ref _bytesPerChannel[ch], 0);
+
+            // clear logs queue and UI
+            while (_logQueue.TryDequeue(out _)) { }
+            _ = DispatcherQueue.TryEnqueue(() => { LogTextBox.Text = string.Empty; QueueTextBlock.Text = "Queue: 0"; BytesTextBlock.Text = "Bytes: ch0=0 ch1=0 ch2=0 ch3=0"; WaveCanvas0.Children.Clear(); WaveCanvas1.Children.Clear(); WaveCanvas2.Children.Clear(); WaveCanvas3.Children.Clear(); });
+            AddLog("Cleared display, logs, and counters");
+        }
+
+        private void StartCountersTimer()
+        {
+            _counterTimer?.Change(0, 200);
+        }
+
+        private void StopCountersTimer()
+        {
+            _counterTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        }
+
+        private void WaveCanvas_PointerEnter(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {
+            // no-op: we always display the latest sample value in the HoverText controls
+        }
+
+        private void WaveCanvas_PointerExit(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {
+            // no-op: keep hover labels visible and showing the latest value
+        }
+
+        private void WaveCanvas_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {            // no-op: we don't use pointer location to inspect historical samples any more
+        }
+
+        private void DisconnectButton_Click(object sender, RoutedEventArgs e)
+        {
+            _serialService.Disconnect();
+            _ = DispatcherQueue.TryEnqueue(() => { StatusTextBlock.Text = "Disconnected"; });
+        }
+
+        private void StartButton_Click(object sender, RoutedEventArgs e)
+        {
+            _running = true;
+            StartUiTimer();
+            StartCountersTimer();
+            AddLog("Capture started");
+            StatusTextBlock.Text = "Running";
+        }
+
+        private void StopButton_Click(object sender, RoutedEventArgs e)
+        {
+            _running = false;
+            StopUiTimer();
+            StopCountersTimer();
+            AddLog("Capture stopped");
+            StatusTextBlock.Text = "Stopped";
+        }
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "ADC_Rec (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "ADC_Rec (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
