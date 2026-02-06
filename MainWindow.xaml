@@ -31,11 +31,6 @@
                 <Button x:Name="StopButton" Content="Stop" Click="StopButton_Click" />
             </StackPanel>
 
-            <TextBlock Text="CPU Frequency (Hz)" />
-            <TextBox x:Name="CpuFreqTextBox" Text="240000000" Width="200" />
-            <TextBlock Text="Ramp slope (V/s)" />
-            <TextBox x:Name="RampSlopeTextBox" Text="1.0" Width="200" />
-
             <TextBlock Text="Display window (ms)" />
             <ComboBox x:Name="DisplayWindowCombo" Width="200" SelectionChanged="DisplayWindowCombo_SelectionChanged">
                 <ComboBoxItem Content="100" />
@@ -50,8 +45,6 @@
                 <NumberBox x:Name="PlotBitsNumberBox" Width="90" Value="16" Minimum="8" Maximum="24" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="PlotBitsNumberBox_ValueChanged" />
                 <TextBlock Text="bits" VerticalAlignment="Center" Margin="4,0,0,0" />
             </StackPanel>
-            <CheckBox x:Name="ReverseBytesCheck" Content="Reverse bytes for sample" IsChecked="False" />
-
             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                 <CheckBox x:Name="FitToDataCheck" Content="Fit to data (autoscale)" IsChecked="True" />
             </StackPanel>

@@ -37,8 +37,6 @@ namespace ADC_Rec
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
         private System.Threading.Timer? _uiTimer = null;
         private System.Threading.Timer? _counterTimer = null; // updates bytes-per-channel UI every 200ms
-        private double _cpuFreq = 240000000.0;
-        private double _rampSlope = 1.0;
         private int _displayWindowSamples = 48000; // default 1s
         private int _sampleRate = 48000; // default sample rate
         private int _plotBits = 16; // default plot bits (user-selectable)
@@ -64,14 +62,16 @@ namespace ADC_Rec
         private int _lastDrainTick = 0;
         private bool _drainStartedLogged = false;
         private bool _drainIdleLogged = false;
-        private bool _reverseBytes = false; // when true, reverse 3-byte order when interpreting samples
-        private const int DrainBatchSize = 512;
-        private const int DrainIdleMs = 5;
+        private const int DrainBatchSize = 2048;
+        private const int DrainIdleMs = 1;
+        private const int DrainHighWaterMark = MaxPacketQueue;
+        private const int DrainTargetQueue = MaxPacketQueue / 2;
 
         // Reusable display buffers to avoid allocations
         private float[][] _displayBuffers = new float[Models.Packet.NumChannels][];
         private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
         private long[] _bytesPerChannel = new long[Models.Packet.NumChannels]; // parsed bytes per channel (cumulative)
+        private uint[] _hoverRaw = new uint[1];
 
         public MainWindow()
         {
@@ -86,12 +86,6 @@ namespace ADC_Rec
             _parser.DebugLine += (s) => { if (_parser.Verbose) AddLog("[DBG] " + s); };
 
             _plotManager = new Managers.PlotManager(48000); // 1 s history default
-
-            // initialize UI-driven conversion parameters
-            double.TryParse(CpuFreqTextBox.Text, out _cpuFreq);
-            double.TryParse(RampSlopeTextBox.Text, out _rampSlope);
-            CpuFreqTextBox.TextChanged += (s, e) => { double.TryParse(CpuFreqTextBox.Text, out _cpuFreq); };
-            RampSlopeTextBox.TextChanged += (s, e) => { double.TryParse(RampSlopeTextBox.Text, out _rampSlope); };
 
             // prepare display buffers
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _displayBuffers[ch] = new float[_displayWindowSamples];
@@ -124,12 +118,6 @@ namespace ADC_Rec
             {
                 PlotBitsNumberBox.Value = _plotBits;
                 // ValueChanged is wired in XAML; additional hookup not required here.
-            }
-            if (ReverseBytesCheck != null)
-            {
-                ReverseBytesCheck.IsChecked = _reverseBytes;
-                ReverseBytesCheck.Checked += (s, e) => { _reverseBytes = true; _logQueue.Enqueue("Reverse bytes: ON"); ForceRedraw(); };
-                ReverseBytesCheck.Unchecked += (s, e) => { _reverseBytes = false; _logQueue.Enqueue("Reverse bytes: OFF"); ForceRedraw(); };
             }
 
             // Show hover/last-value labels all the time (initialize)
@@ -366,7 +354,7 @@ namespace ADC_Rec
         private void StartUiTimer()
         {
             if (_uiTimer != null) return; // already running
-            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 33); // ~30Hz
+            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 50); // ~20Hz to reduce UI load
         }
 
         private void StopUiTimer()
@@ -449,6 +437,26 @@ namespace ADC_Rec
                     }
                     _drainIdleLogged = false;
                     System.Threading.Interlocked.Increment(ref _drainLoopIterations);
+                    int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+                    if (!_recording && queueCount >= DrainHighWaterMark)
+                    {
+                        int toDrop = Math.Max(0, queueCount - DrainTargetQueue);
+                        int dropped = 0;
+                        for (int i = 0; i < toDrop; i++)
+                        {
+                            if (_packetQueue.TryDequeue(out _))
+                            {
+                                System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                                dropped++;
+                            }
+                            else break;
+                        }
+                        if (dropped > 0)
+                        {
+                            System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
+                            System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
+                        }
+                    }
                     var batch = new List<Models.Packet>(DrainBatchSize);
                     for (int i = 0; i < DrainBatchSize; i++)
                     {
@@ -466,9 +474,7 @@ namespace ADC_Rec
                         await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
                         continue;
                     }
-                    // Use the latest configured conversion parameters (updated by UI events)
-                    float voltsPerCycle = (float)(_rampSlope / Math.Max(1.0, _cpuFreq));
-                    _plotManager.AddPacketsBatch(batch, voltsPerCycle, _plotBits);
+                    _plotManager.AddPacketsBatch(batch, 0f, _plotBits);
                     // Track processed packets for diagnostics
                     System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
 
@@ -556,7 +562,6 @@ namespace ADC_Rec
                     for (int i = 0; i < length; i++)
                     {
                         uint raw = (uint)samples[i] & 0x00FFFFFFu;
-                        if (_reverseBytes) raw = ADC_Rec.PlotUtils.ReverseBytes24(raw);
                         int vUnsigned = ConvertRawToUnsigned(raw);
                         float v = (float)vUnsigned;
                         if (v < min) min = v;
@@ -602,7 +607,6 @@ namespace ADC_Rec
                     {
                         // Convert raw sample to unsigned plotted value respecting plot bits and byte order
                         uint raw = (uint)samples[k] & 0x00FFFFFFu;
-                        if (_reverseBytes) raw = ADC_Rec.PlotUtils.ReverseBytes24(raw);
                         int vUnsigned = ConvertRawToUnsigned(raw);
                         float v = (float)vUnsigned;
                         if (_fitToData) v -= mid;
@@ -642,7 +646,6 @@ namespace ADC_Rec
                 {
                     // Convert last sample to signed plotted value
                     uint rawLast = (uint)samples[length - 1] & 0x00FFFFFFu;
-                    if (_reverseBytes) rawLast = ADC_Rec.PlotUtils.ReverseBytes24(rawLast);
                     int vLast = ConvertRawToUnsigned(rawLast);
                     float last = (float)vLast;
                     if (_fitToData) last -= mid;
@@ -698,16 +701,7 @@ namespace ADC_Rec
                         byte b0 = (byte)(v & 0xFF);
                         byte b1 = (byte)((v >> 8) & 0xFF);
                         byte b2 = (byte)((v >> 16) & 0xFF);
-                        uint vrev = ADC_Rec.PlotUtils.ReverseBytes24(v);
-                        if (_reverseBytes)
-                        {
-                            // Show reversed sample as decimal integer (no hex) for easier numeric inspection
-                            _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2},0x{b2:X2}, = CH{ch}, {v}, rev={vrev}");
-                        }
-                        else
-                        {
-                            _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2},0x{b2:X2}, = CH{ch}, {v}");
-                        }
+                        _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2},0x{b2:X2}, = CH{ch}, {v}");
                     }
                     // separator line between channels for readability
                     _logQueue.Enqueue(string.Empty);

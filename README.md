@@ -43,7 +43,54 @@ SerialPort -> Parser -> Packet queue -> DrainLoop -> PlotManager buffers -> UI t
    - Plot bits control **vertical range** (0..2^bits−1).
    - Fit‑to‑data centers around midpoint (AC‑coupled).
 
-## 2. Diagnostic Output (Copy Diag)
+## 2. Packet Trace (Function‑by‑Function + Threads)
+
+This is a full packet trace from the wire to the graph, including the thread/context for each function.
+
+1. **`SerialService.OnDataReceived`** *(SerialPort event thread)*
+   - Triggered by `SerialPort.DataReceived`.
+   - Reads all available bytes into a buffer and invokes `DataReceived`.
+
+2. **`MainWindow.SerialService_DataReceived`** *(SerialPort event thread)*
+   - Guards on `_running`.
+   - Calls `_parser.Feed(data)`.
+
+3. **`Parser.Feed`** *(SerialPort event thread)*
+   - Appends bytes to `_buf`.
+   - Scans for `0x55 0xAA` sentinel and validates packet size (98 bytes).
+   - Calls `ParsePayload(...)` and emits `PacketParsed` for each valid packet.
+
+4. **`MainWindow.Parser_PacketParsed`** *(SerialPort event thread)*
+   - Enqueues packets to `_packetQueue`.
+   - Updates `_pendingPacketCount` and `_bytesPerChannel`.
+   - Enforces `MaxPacketQueue` (4096) and counts drops.
+
+5. **`MainWindow.StartBackgroundDrain`** *(UI thread)*
+   - Starts a background task (`DrainLoop`) via `Task.Factory.StartNew(..., LongRunning)`.
+
+6. **`MainWindow.DrainLoop`** *(background drain thread)*
+   - Runs continuously while cancellation is not requested.
+   - If `_running` is false, sleeps briefly.
+   - If queue reaches high water mark, drops older packets (unless recording).
+   - Dequeues up to `DrainBatchSize` (2048) packets into a batch.
+   - Calls `_plotManager.AddPacketsBatch(...)` with raw samples.
+   - Writes the same batch to disk if recording is enabled.
+
+7. **`PlotManager.AddPacketsBatch`** *(background drain thread)*
+   - Stores raw 24‑bit samples into circular buffers (`_buffers`, `_rawBuffers`).
+
+8. **`MainWindow.ProcessPendingPackets`** *(UI thread via DispatcherQueue + UI timer)*
+   - UI timer (~20 Hz) enqueues this on the UI thread.
+   - Calls `_plotManager.FillChannelSnapshot(...)` to get latest samples.
+   - Calls `DrawChannel(...)` for each canvas.
+   - Updates hover labels with latest sample values.
+
+9. **`MainWindow.DrawChannel`** *(UI thread)*
+   - Computes min/max (and midpoint if Fit‑to‑data).
+   - Decimates samples into buckets and builds `Polyline` points.
+   - Renders the waveform and most-recent dot.
+
+## 3. Diagnostic Output (Copy Diag)
 
 `Copy Diag` includes:
 
@@ -58,7 +105,7 @@ SerialPort -> Parser -> Packet queue -> DrainLoop -> PlotManager buffers -> UI t
 
 If `parsed` increases but `proc` stays at 0, the drain loop is not running.
 
-## 3. Why Graphs Are Choppy / Sluggish
+## 4. Why Graphs Are Choppy / Sluggish
 
 Even with low CPU usage, the UI can still appear sluggish when:
 
@@ -77,27 +124,27 @@ Even with low CPU usage, the UI can still appear sluggish when:
 4. **DrainLoop scheduling**
    - If the DrainLoop doesn’t run or is delayed, buffers never update and queue overflows.
 
-## 4. Performance Improvement Ideas
+## 5. Performance Improvement Ideas
 
-### A) Improve Drain Throughput
+### A) Improve Drain Throughput (Current Settings)
 1. **Increase drain batch size**
-   - Raise `DrainBatchSize` (e.g., 1024–4096) to reduce scheduling overhead.
+   - Currently `DrainBatchSize = 2048`.
 2. **Decrease drain idle delay**
-   - Lower `DrainIdleMs` when queue is non‑empty.
+   - Currently `DrainIdleMs = 1` ms.
 3. **Avoid per-packet allocations**
    - Reuse `List<Packet>` and preallocate buffers.
 
-### B) Reduce UI Rendering Cost
+### B) Reduce UI Rendering Cost (Current Settings)
 1. **Lower UI refresh rate**
-   - Drop UI timer to 15–20 Hz instead of 30 Hz.
+   - Currently ~20 Hz (`ProcessPendingPackets` every 50 ms).
 2. **Reuse drawing objects**
    - Keep a single `Polyline` and update points instead of recreating objects.
 3. **Reduce decimation overhead**
    - Reduce bucket count or precompute min/max in background.
 
-### C) Mitigate Queue Overflows
+### C) Mitigate Queue Overflows (Current Settings)
 1. **Backpressure strategy**
-   - Instead of dropping per packet, drop in larger chunks when queue exceeds limit.
+   - Drain loop drops backlog when queue hits 4096 → trims to half (unless recording).
 2. **Prioritize newest data**
    - If behind, skip old packets and only keep the newest batch.
 
@@ -107,7 +154,7 @@ Even with low CPU usage, the UI can still appear sluggish when:
 2. **Use larger read sizes**
    - If possible, read fixed packet multiples to reduce fragmentation.
 
-## 5. Next Steps (Suggested)
+## 6. Next Steps (Suggested)
 
 1. Confirm drain loop stability and `proc` increasing.
 2. Increase drain batch size and reduce idle delay.
