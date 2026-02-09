@@ -34,6 +34,7 @@ namespace ADC_Rec.Services
         private float _dcLeft;
         private float _dcRight;
         private const float DcAlpha = 0.995f;
+        private bool _dcBlockEnabled = true;
 
         private readonly float[] _meterLedsLeft = new float[LedCount];
         private readonly float[] _meterLedsRight = new float[LedCount];
@@ -87,6 +88,11 @@ namespace ADC_Rec.Services
             if (ch < 0 || ch >= Packet.NumChannels) return;
             pan = Math.Max(-1f, Math.Min(1f, pan));
             lock (_lock) { _channelPans[ch] = pan; }
+        }
+
+        public void SetDcBlockEnabled(bool enabled)
+        {
+            lock (_lock) { _dcBlockEnabled = enabled; }
         }
 
         public float[] GetMeterLedsLeft() => _meterLedsLeft;
@@ -172,6 +178,12 @@ namespace ADC_Rec.Services
                 Array.Copy(_channelGains, gains, Packet.NumChannels);
                 Array.Copy(_channelPans, pans, Packet.NumChannels);
                 Array.Copy(_channelInputBits, bits, Packet.NumChannels);
+                // read once per batch for consistency
+            }
+            bool dcEnabled;
+            lock (_lock)
+            {
+                dcEnabled = _dcBlockEnabled;
             }
 
             var outputSamples = new List<float>();
@@ -193,8 +205,11 @@ namespace ADC_Rec.Services
                         mixL += sample * gain * leftGain;
                         mixR += sample * gain * rightGain;
                     }
-                    mixL = ApplyDcBlock(mixL, ref _dcLeft);
-                    mixR = ApplyDcBlock(mixR, ref _dcRight);
+                    if (dcEnabled)
+                    {
+                        mixL = ApplyDcBlock(mixL, ref _dcLeft);
+                        mixR = ApplyDcBlock(mixR, ref _dcRight);
+                    }
                     StoreMonitorSample(mixL, mixR, outputSamples);
                 }
             }

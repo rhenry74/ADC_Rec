@@ -113,6 +113,13 @@ namespace ADC_Rec
                 FitToDataCheck.Unchecked += (s, e) => { _fitToData = false; _logQueue.Enqueue("Fit to data: OFF"); };
             }
 
+            if (DcBlockCheck != null)
+            {
+                DcBlockCheck.IsChecked = true;
+                DcBlockCheck.Checked += (s, e) => { _audioMixService?.SetDcBlockEnabled(true); _logQueue.Enqueue("DC block: ON"); };
+                DcBlockCheck.Unchecked += (s, e) => { _audioMixService?.SetDcBlockEnabled(false); _logQueue.Enqueue("DC block: OFF"); };
+            }
+
             // Verbose checkbox hookup (if exists)
             if (VerboseCheckbox != null)
             {

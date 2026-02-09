@@ -83,6 +83,8 @@ state = sample + out * alpha
 
 This reduces DC offset that can cause popping or bias.
 
+**Toggle:** The UI now has a **DC block** checkbox that enables/disables this step.
+
 ---
 
 ## Plot Bits (Graph Scaling)

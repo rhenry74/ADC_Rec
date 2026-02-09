@@ -48,6 +48,9 @@
             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                 <CheckBox x:Name="FitToDataCheck" Content="Fit to data (autoscale)" IsChecked="True" />
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <CheckBox x:Name="DcBlockCheck" Content="DC block" IsChecked="True" />
+            </StackPanel>
 
             <TextBlock Text="Status:" FontWeight="Bold" Margin="0,8,0,0" />
             <TextBlock x:Name="StatusTextBlock" Text="Idle" TextWrapping="Wrap" />
