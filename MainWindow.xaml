@@ -98,9 +98,6 @@
                             <TextBlock Text="CH0 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider0" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText0" Text="1.00x" />
-                            <TextBlock Text="CH0 Pan" FontWeight="SemiBold" />
-                            <Slider x:Name="PanSlider0" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
-                            <TextBlock x:Name="PanText0" Text="Center" />
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -120,9 +117,6 @@
                             <TextBlock Text="CH1 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider1" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText1" Text="1.00x" />
-                            <TextBlock Text="CH1 Pan" FontWeight="SemiBold" />
-                            <Slider x:Name="PanSlider1" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
-                            <TextBlock x:Name="PanText1" Text="Center" />
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -142,9 +136,6 @@
                             <TextBlock Text="CH2 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider2" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText2" Text="1.00x" />
-                            <TextBlock Text="CH2 Pan" FontWeight="SemiBold" />
-                            <Slider x:Name="PanSlider2" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
-                            <TextBlock x:Name="PanText2" Text="Center" />
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -164,24 +155,59 @@
                             <TextBlock Text="CH3 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider3" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText3" Text="1.00x" />
-                            <TextBlock Text="CH3 Pan" FontWeight="SemiBold" />
-                            <Slider x:Name="PanSlider3" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
-                            <TextBlock x:Name="PanText3" Text="Center" />
                         </StackPanel>
                     </Grid>
                 </Border>
 
                 <Border BorderBrush="Gray" BorderThickness="1" Padding="8" CornerRadius="4">
-                    <StackPanel Orientation="Horizontal" Spacing="16">
-                        <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Margin="0,0,12,0">
                             <TextBlock Text="Mix L" FontWeight="SemiBold" HorizontalAlignment="Center" />
                             <StackPanel x:Name="MeterLeftPanel" Orientation="Vertical" Spacing="2" />
+                            <TextBlock Text="Peak Hold" FontSize="11" Margin="0,6,0,0" />
+                            <ProgressBar x:Name="PeakHoldLeftBar" Minimum="0" Maximum="1" Height="6" Width="60" />
+                            <TextBlock Text="Avg Hold" FontSize="11" Margin="0,4,0,0" />
+                            <ProgressBar x:Name="AvgHoldLeftBar" Minimum="0" Maximum="1" Height="6" Width="60" />
                         </StackPanel>
-                        <StackPanel>
+                        <StackPanel Grid.Column="1" Margin="0,0,12,0">
                             <TextBlock Text="Mix R" FontWeight="SemiBold" HorizontalAlignment="Center" />
                             <StackPanel x:Name="MeterRightPanel" Orientation="Vertical" Spacing="2" />
+                            <TextBlock Text="Peak Hold" FontSize="11" Margin="0,6,0,0" />
+                            <ProgressBar x:Name="PeakHoldRightBar" Minimum="0" Maximum="1" Height="6" Width="60" />
+                            <TextBlock Text="Avg Hold" FontSize="11" Margin="0,4,0,0" />
+                            <ProgressBar x:Name="AvgHoldRightBar" Minimum="0" Maximum="1" Height="6" Width="60" />
                         </StackPanel>
-                    </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="6">
+                            <TextBlock Text="Pan Controls" FontWeight="SemiBold" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="6">
+                                    <TextBlock Text="CH0 Pan" />
+                                    <Slider x:Name="PanSlider0" Minimum="-1" Maximum="1" Value="0" SmallChange="0.01" StepFrequency="0.01" IsThumbToolTipEnabled="True" ValueChanged="PanSlider_ValueChanged" />
+                                    <TextBlock x:Name="PanText0" Text="Center" />
+                                    <TextBlock Text="CH1 Pan" Margin="0,6,0,0" />
+                                    <Slider x:Name="PanSlider1" Minimum="-1" Maximum="1" Value="0" SmallChange="0.01" StepFrequency="0.01" IsThumbToolTipEnabled="True" ValueChanged="PanSlider_ValueChanged" />
+                                    <TextBlock x:Name="PanText1" Text="Center" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="6">
+                                    <TextBlock Text="CH2 Pan" />
+                                    <Slider x:Name="PanSlider2" Minimum="-1" Maximum="1" Value="0" SmallChange="0.01" StepFrequency="0.01" IsThumbToolTipEnabled="True" ValueChanged="PanSlider_ValueChanged" />
+                                    <TextBlock x:Name="PanText2" Text="Center" />
+                                    <TextBlock Text="CH3 Pan" Margin="0,6,0,0" />
+                                    <Slider x:Name="PanSlider3" Minimum="-1" Maximum="1" Value="0" SmallChange="0.01" StepFrequency="0.01" IsThumbToolTipEnabled="True" ValueChanged="PanSlider_ValueChanged" />
+                                    <TextBlock x:Name="PanText3" Text="Center" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </Grid>
                 </Border>
             </StackPanel>
         </Grid>

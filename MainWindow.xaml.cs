@@ -176,11 +176,17 @@ namespace ADC_Rec
         private void ForceRedraw()
         {
             _ = DispatcherQueue.TryEnqueue(() => {
+                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
+                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
+                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
+                        : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n);
+                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
                 }
             });
         }
@@ -298,12 +304,11 @@ namespace ADC_Rec
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
                     float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float norm = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetNormalizationGainForBits(bitsSnapshot[ch])
+                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
                         : 1f;
-                    for (int i = 0; i < n; i++) _displayBuffers[ch][i] *= gain * norm;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n);
+                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
                     if (n > 0) anyDrawn = true;
                 }
 
@@ -341,6 +346,11 @@ namespace ADC_Rec
                 UpdateMeterRect(_meterLeftRects[i], left[i], i);
                 UpdateMeterRect(_meterRightRects[i], right[i], i);
             }
+
+            if (PeakHoldLeftBar != null) PeakHoldLeftBar.Value = _audioMixService.PeakHoldLeft;
+            if (PeakHoldRightBar != null) PeakHoldRightBar.Value = _audioMixService.PeakHoldRight;
+            if (AvgHoldLeftBar != null) AvgHoldLeftBar.Value = _audioMixService.AvgHoldLeft;
+            if (AvgHoldRightBar != null) AvgHoldRightBar.Value = _audioMixService.AvgHoldRight;
         }
 
         private void UpdateMeterRect(Rectangle rect, float lit, int index)
@@ -614,7 +624,7 @@ namespace ADC_Rec
             catch { }
         }
 
-        private void DrawChannel(Canvas canvas, float[] samples, int length)
+        private void DrawChannel(Canvas canvas, float[] samples, int length, float scale)
         {
             try
             {
@@ -638,7 +648,7 @@ namespace ADC_Rec
                     {
                         uint raw = (uint)samples[i] & 0x00FFFFFFu;
                         int vUnsigned = ConvertRawToUnsigned(raw);
-                        float v = (float)vUnsigned;
+                        float v = (float)vUnsigned * scale;
                         if (v < min) min = v;
                         if (v > max) max = v;
                     }
@@ -683,7 +693,7 @@ namespace ADC_Rec
                         // Convert raw sample to unsigned plotted value respecting plot bits and byte order
                         uint raw = (uint)samples[k] & 0x00FFFFFFu;
                         int vUnsigned = ConvertRawToUnsigned(raw);
-                        float v = (float)vUnsigned;
+                        float v = (float)vUnsigned * scale;
                         if (_fitToData) v -= mid;
                         if (v < bmin) bmin = v;
                         if (v > bmax) bmax = v;
@@ -722,7 +732,7 @@ namespace ADC_Rec
                     // Convert last sample to signed plotted value
                     uint rawLast = (uint)samples[length - 1] & 0x00FFFFFFu;
                     int vLast = ConvertRawToUnsigned(rawLast);
-                    float last = (float)vLast;
+                    float last = (float)vLast * scale;
                     if (_fitToData) last -= mid;
                     double xLast = w; // most recent sample drawn at right edge
                     double yLast = h - ((last - min) / range) * h;
@@ -864,7 +874,6 @@ namespace ADC_Rec
                     }
                 }
                 catch { }
-                _plotManager?.RescaleBuffers(_plotBits);
                 ForceRedraw();
             }
             catch (Exception ex) { _logQueue.Enqueue("PlotBits number change error: " + ex.Message); }

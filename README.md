@@ -48,6 +48,18 @@ sample *= gain
 - Gains come from the **Gain sliders** (0–1000x) and are updated via `GainSlider_ValueChanged`.
 - Gains are also applied to the graph data in `ProcessPendingPackets()` so the waveform reflects gain.
 
+### Graph scaling now matches the 24‑bit pipeline
+**Where:** `MainWindow.ProcessPendingPackets()` → `DrawChannel(...)`
+
+The plotted samples are scaled to the same 24‑bit pipeline definition you described:
+
+```
+scaleTo24 = 2^(24 - inputBits)
+displaySample = raw * scaleTo24 * gain
+```
+
+So the graph is **input‑bits‑to‑24‑bit scaled**, then **gain** is applied. Plot Bits only affects display range (below).
+
 ### 3) Pan (per channel)
 **Where:** `AudioMixService.ProcessPackets(...)`
 
@@ -83,7 +95,7 @@ This reduces DC offset that can cause popping or bias.
 0 .. (2^plotBits - 1)
 ```
 
-- Changing Plot Bits calls `_plotManager.RescaleBuffers(_plotBits)` and redraws.
+- Plot Bits is now **display‑only**: it does **not** rescale buffers. It only sets the fixed display range when Fit‑to‑Data is off.
 
 ---
 
@@ -101,6 +113,10 @@ peak = max(|L|) or max(|R|)
 ```
 
 - The LEDs are filled proportionally: `lit = round(peak * LED_COUNT)`.
+
+**Peak/Avg hold indicators:**
+- `AudioMixService` maintains peak‑hold (decaying) and average‑hold (smoothed) values.
+- `MainWindow.UpdateMeterUi()` assigns those to `PeakHold*` and `AvgHold*` progress bars.
 
 **Color ranges:**
 - Top 10% = red

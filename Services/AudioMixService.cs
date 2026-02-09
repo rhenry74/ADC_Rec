@@ -38,6 +38,13 @@ namespace ADC_Rec.Services
         private readonly float[] _meterLedsLeft = new float[LedCount];
         private readonly float[] _meterLedsRight = new float[LedCount];
 
+        private float _peakHoldLeft;
+        private float _peakHoldRight;
+        private float _avgHoldLeft;
+        private float _avgHoldRight;
+        private const float PeakHoldDecay = 0.98f;
+        private const float AvgHoldSmoothing = 0.9f;
+
         public AudioMixService()
         {
             for (int ch = 0; ch < Packet.NumChannels; ch++)
@@ -84,6 +91,10 @@ namespace ADC_Rec.Services
 
         public float[] GetMeterLedsLeft() => _meterLedsLeft;
         public float[] GetMeterLedsRight() => _meterLedsRight;
+        public float PeakHoldLeft => _peakHoldLeft;
+        public float PeakHoldRight => _peakHoldRight;
+        public float AvgHoldLeft => _avgHoldLeft;
+        public float AvgHoldRight => _avgHoldRight;
 
         public void StartPlayback()
         {
@@ -236,15 +247,32 @@ namespace ADC_Rec.Services
         {
             float peakL = 0f;
             float peakR = 0f;
+            float sumL = 0f;
+            float sumR = 0f;
+            int frameSamples = 0;
             for (int i = 0; i < outputSamples.Count; i += 2)
             {
                 float l = Math.Abs(outputSamples[i]);
                 float r = Math.Abs(outputSamples[i + 1]);
                 if (l > peakL) peakL = l;
                 if (r > peakR) peakR = r;
+                sumL += l;
+                sumR += r;
+                frameSamples++;
             }
             UpdateLedArray(_meterLedsLeft, peakL);
             UpdateLedArray(_meterLedsRight, peakR);
+
+            _peakHoldLeft = Math.Max(peakL, _peakHoldLeft * PeakHoldDecay);
+            _peakHoldRight = Math.Max(peakR, _peakHoldRight * PeakHoldDecay);
+
+            if (frameSamples > 0)
+            {
+                float avgL = sumL / frameSamples;
+                float avgR = sumR / frameSamples;
+                _avgHoldLeft = (_avgHoldLeft * AvgHoldSmoothing) + (avgL * (1f - AvgHoldSmoothing));
+                _avgHoldRight = (_avgHoldRight * AvgHoldSmoothing) + (avgR * (1f - AvgHoldSmoothing));
+            }
         }
 
         private void UpdateLedArray(float[] leds, float level)
@@ -272,6 +300,13 @@ namespace ADC_Rec.Services
             int maxVal = (1 << bits) - 1;
             float mid = maxVal / 2f;
             return 1f / Math.Max(1f, mid);
+        }
+
+        public static float GetScaleTo24BitCounts(int inputBits)
+        {
+            int bits = Math.Max(1, Math.Min(24, inputBits));
+            int shift = 24 - bits;
+            return (float)(1 << Math.Max(0, shift));
         }
 
         private static int FloatTo24Bit(float sample)
