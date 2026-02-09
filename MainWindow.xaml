@@ -84,27 +84,104 @@
             <StackPanel Grid.Row="1" Orientation="Vertical" Spacing="8">
                 <Border BorderBrush="Gray" BorderThickness="1" Padding="4" CornerRadius="4">
                     <Grid>
-                        <Canvas x:Name="WaveCanvas0" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
-                        <TextBlock x:Name="HoverText0" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="220" />
+                        </Grid.ColumnDefinitions>
+                        <Grid Grid.Column="0">
+                            <Canvas x:Name="WaveCanvas0" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
+                            <TextBlock x:Name="HoverText0" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        </Grid>
+                        <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
+                            <TextBlock Text="CH0 Input Bits" FontWeight="SemiBold" />
+                            <NumberBox x:Name="InputBits0" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <TextBlock Text="CH0 Gain" FontWeight="SemiBold" />
+                            <Slider x:Name="GainSlider0" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
+                            <TextBlock x:Name="GainText0" Text="1.00x" />
+                            <TextBlock Text="CH0 Pan" FontWeight="SemiBold" />
+                            <Slider x:Name="PanSlider0" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
+                            <TextBlock x:Name="PanText0" Text="Center" />
+                        </StackPanel>
                     </Grid>
                 </Border>
                 <Border BorderBrush="Gray" BorderThickness="1" Padding="4" CornerRadius="4">
                     <Grid>
-                        <Canvas x:Name="WaveCanvas1" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
-                        <TextBlock x:Name="HoverText1" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="220" />
+                        </Grid.ColumnDefinitions>
+                        <Grid Grid.Column="0">
+                            <Canvas x:Name="WaveCanvas1" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
+                            <TextBlock x:Name="HoverText1" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        </Grid>
+                        <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
+                            <TextBlock Text="CH1 Input Bits" FontWeight="SemiBold" />
+                            <NumberBox x:Name="InputBits1" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <TextBlock Text="CH1 Gain" FontWeight="SemiBold" />
+                            <Slider x:Name="GainSlider1" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
+                            <TextBlock x:Name="GainText1" Text="1.00x" />
+                            <TextBlock Text="CH1 Pan" FontWeight="SemiBold" />
+                            <Slider x:Name="PanSlider1" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
+                            <TextBlock x:Name="PanText1" Text="Center" />
+                        </StackPanel>
                     </Grid>
                 </Border>
                 <Border BorderBrush="Gray" BorderThickness="1" Padding="4" CornerRadius="4">
                     <Grid>
-                        <Canvas x:Name="WaveCanvas2" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
-                        <TextBlock x:Name="HoverText2" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="220" />
+                        </Grid.ColumnDefinitions>
+                        <Grid Grid.Column="0">
+                            <Canvas x:Name="WaveCanvas2" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
+                            <TextBlock x:Name="HoverText2" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        </Grid>
+                        <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
+                            <TextBlock Text="CH2 Input Bits" FontWeight="SemiBold" />
+                            <NumberBox x:Name="InputBits2" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <TextBlock Text="CH2 Gain" FontWeight="SemiBold" />
+                            <Slider x:Name="GainSlider2" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
+                            <TextBlock x:Name="GainText2" Text="1.00x" />
+                            <TextBlock Text="CH2 Pan" FontWeight="SemiBold" />
+                            <Slider x:Name="PanSlider2" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
+                            <TextBlock x:Name="PanText2" Text="Center" />
+                        </StackPanel>
                     </Grid>
                 </Border>
                 <Border BorderBrush="Gray" BorderThickness="1" Padding="4" CornerRadius="4">
                     <Grid>
-                        <Canvas x:Name="WaveCanvas3" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
-                        <TextBlock x:Name="HoverText3" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="220" />
+                        </Grid.ColumnDefinitions>
+                        <Grid Grid.Column="0">
+                            <Canvas x:Name="WaveCanvas3" Height="140" Background="Black" PointerMoved="WaveCanvas_PointerMoved" PointerEntered="WaveCanvas_PointerEnter" PointerExited="WaveCanvas_PointerExit" />
+                            <TextBlock x:Name="HoverText3" Foreground="Yellow" Margin="6" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed" />
+                        </Grid>
+                        <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
+                            <TextBlock Text="CH3 Input Bits" FontWeight="SemiBold" />
+                            <NumberBox x:Name="InputBits3" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <TextBlock Text="CH3 Gain" FontWeight="SemiBold" />
+                            <Slider x:Name="GainSlider3" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
+                            <TextBlock x:Name="GainText3" Text="1.00x" />
+                            <TextBlock Text="CH3 Pan" FontWeight="SemiBold" />
+                            <Slider x:Name="PanSlider3" Minimum="-1" Maximum="1" Value="0" ValueChanged="PanSlider_ValueChanged" />
+                            <TextBlock x:Name="PanText3" Text="Center" />
+                        </StackPanel>
                     </Grid>
+                </Border>
+
+                <Border BorderBrush="Gray" BorderThickness="1" Padding="8" CornerRadius="4">
+                    <StackPanel Orientation="Horizontal" Spacing="16">
+                        <StackPanel>
+                            <TextBlock Text="Mix L" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <StackPanel x:Name="MeterLeftPanel" Orientation="Vertical" Spacing="2" />
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock Text="Mix R" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <StackPanel x:Name="MeterRightPanel" Orientation="Vertical" Spacing="2" />
+                        </StackPanel>
+                    </StackPanel>
                 </Border>
             </StackPanel>
         </Grid>

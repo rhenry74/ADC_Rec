@@ -1,5 +1,115 @@
 # ADC_Rec — Architecture & Performance Notes
 
+## Audio Mix & Monitoring Pipeline (Serial → Mixer → Monitor/WAV)
+
+High‑level flow (audio‑related path):
+
+```
+SerialPort -> Parser -> Packet queue -> DrainLoop -> AudioMixService.ProcessPackets ->
+  (A) Monitor output @ 44.1 kHz -> PC audio
+  (B) WAV output @ 48 kHz -> MediaFoundationResampler -> 24‑bit PCM .wav
+```
+
+### Where the graph data is siphoned off
+- **Graphs** are updated from `PlotManager` in `MainWindow.ProcessPendingPackets()`.
+- The samples used for graphs come from `PlotManager.FillChannelSnapshot(...)`.
+- `PlotManager` is filled in **DrainLoop** via `_plotManager.AddPacketsBatch(batch, ...)`.
+
+### Where monitor audio is produced
+- The **monitor output** is produced in `Services/AudioMixService.ProcessPackets(...)`.
+- This is called from **DrainLoop** in `MainWindow.DrainLoop(...)` after packets are dequeued.
+- Monitor playback uses a 44.1 kHz `BufferedWaveProvider` and `WaveOutEvent`.
+
+---
+
+## Math & Signal Chain Details
+
+### 1) Input normalization (per channel)
+**Where:** `AudioMixService.ProcessPackets(...)` via `ConvertUnsignedToFloat(raw, inputBits)`
+
+For each channel:
+
+```
+maxVal = (1 << inputBits) - 1
+mid    = maxVal / 2
+sample = (raw - mid) / mid
+```
+
+- This treats the incoming unsigned samples as centered around the midpoint of the declared bit‑depth.
+- **Input bits** is set per channel from the UI (`InputBits0..3`) via `MainWindow.InputBits_ValueChanged()`.
+
+### 2) Gain (per channel)
+**Where:** `AudioMixService.ProcessPackets(...)`
+
+```
+sample *= gain
+```
+
+- Gains come from the **Gain sliders** (0–1000x) and are updated via `GainSlider_ValueChanged`.
+- Gains are also applied to the graph data in `ProcessPendingPackets()` so the waveform reflects gain.
+
+### 3) Pan (per channel)
+**Where:** `AudioMixService.ProcessPackets(...)`
+
+Constant‑power panning is used:
+
+```
+angle = (pan + 1) * (π / 4)
+leftGain  = cos(angle)
+rightGain = sin(angle)
+mixL += sample * leftGain
+mixR += sample * rightGain
+```
+
+### 4) DC blocking (post‑mix)
+**Where:** `AudioMixService.ProcessPackets(...)` via `ApplyDcBlock(...)`
+
+```
+out = sample - state
+state = sample + out * alpha
+```
+
+This reduces DC offset that can cause popping or bias.
+
+---
+
+## Plot Bits (Graph Scaling)
+**Where:** `MainWindow.DrawChannel(...)`
+
+- If **Fit to Data** is ON, the graph auto‑scales to the observed min/max.
+- If **Fit to Data** is OFF, the vertical range is fixed to:
+
+```
+0 .. (2^plotBits - 1)
+```
+
+- Changing Plot Bits calls `_plotManager.RescaleBuffers(_plotBits)` and redraws.
+
+---
+
+## LED Meter Calculations
+
+**Where:**
+- `AudioMixService.UpdateMeters(...)` computes peak level for left/right.
+- `MainWindow.UpdateMeterUi()` reads LED values and colors the rectangles.
+
+**Math:**
+- The LED driver uses **peak absolute value** of each channel in the mixed output frame:
+
+```
+peak = max(|L|) or max(|R|)
+```
+
+- The LEDs are filled proportionally: `lit = round(peak * LED_COUNT)`.
+
+**Color ranges:**
+- Top 10% = red
+- Next 20% = yellow
+- Bottom 60% = green
+- Unlit LEDs = black
+
+---
+
 This document explains how the application processes incoming ADC data, how plotting is performed, and where current performance bottlenecks likely occur. It also provides concrete ideas for improving throughput and reducing dropped packets.
 
 ## 1. High‑Level Data Flow

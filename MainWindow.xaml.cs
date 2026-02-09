@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Windows.Foundation;
 using Windows.Foundation.Collections;
+using Microsoft.UI.Xaml.Shapes;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -29,6 +30,7 @@ namespace ADC_Rec
         private Services.SerialService _serialService;
         private Services.Parser _parser;
         private Managers.PlotManager _plotManager;
+        private Services.AudioMixService _audioMixService;
         private volatile bool _running = false;
 
         // Incoming packet queue and timer for batched UI updates
@@ -37,8 +39,8 @@ namespace ADC_Rec
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
         private System.Threading.Timer? _uiTimer = null;
         private System.Threading.Timer? _counterTimer = null; // updates bytes-per-channel UI every 200ms
-        private int _displayWindowSamples = 48000; // default 1s
-        private int _sampleRate = 48000; // default sample rate
+        private int _displayWindowSamples = 44100; // default 1s
+        private int _sampleRate = 44100; // default sample rate
         private int _plotBits = 16; // default plot bits (user-selectable)
         private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
         private const int MaxPacketBatchPerTick = 64;
@@ -72,6 +74,9 @@ namespace ADC_Rec
         private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
         private long[] _bytesPerChannel = new long[Models.Packet.NumChannels]; // parsed bytes per channel (cumulative)
         private uint[] _hoverRaw = new uint[1];
+        private readonly System.Collections.Generic.List<Rectangle> _meterLeftRects = new System.Collections.Generic.List<Rectangle>();
+        private readonly System.Collections.Generic.List<Rectangle> _meterRightRects = new System.Collections.Generic.List<Rectangle>();
+        private const int MeterLedCount = 20;
 
         public MainWindow()
         {
@@ -85,7 +90,10 @@ namespace ADC_Rec
             _parser.PacketParsed += Parser_PacketParsed;
             _parser.DebugLine += (s) => { if (_parser.Verbose) AddLog("[DBG] " + s); };
 
-            _plotManager = new Managers.PlotManager(48000); // 1 s history default
+            _plotManager = new Managers.PlotManager(44100); // 1 s history default
+            _audioMixService = new Services.AudioMixService();
+
+            InitializeMeters();
 
             // prepare display buffers
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _displayBuffers[ch] = new float[_displayWindowSamples];
@@ -134,6 +142,37 @@ namespace ADC_Rec
             this.Closed += MainWindow_Closed;
         }
 
+        private void InitializeMeters()
+        {
+            if (MeterLeftPanel == null || MeterRightPanel == null) return;
+            MeterLeftPanel.Children.Clear();
+            MeterRightPanel.Children.Clear();
+            _meterLeftRects.Clear();
+            _meterRightRects.Clear();
+
+            for (int i = 0; i < MeterLedCount; i++)
+            {
+                var leftRect = CreateMeterRect(i);
+                var rightRect = CreateMeterRect(i);
+                MeterLeftPanel.Children.Insert(0, leftRect);
+                MeterRightPanel.Children.Insert(0, rightRect);
+                _meterLeftRects.Add(leftRect);
+                _meterRightRects.Add(rightRect);
+            }
+        }
+
+        private Rectangle CreateMeterRect(int index)
+        {
+            var rect = new Rectangle
+            {
+                Width = 24,
+                Height = 8,
+                Fill = new SolidColorBrush(Microsoft.UI.Colors.DarkGreen),
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            return rect;
+        }
+
         private void ForceRedraw()
         {
             _ = DispatcherQueue.TryEnqueue(() => {
@@ -160,6 +199,7 @@ namespace ADC_Rec
         private void MainWindow_Closed(object sender, Microsoft.UI.Xaml.WindowEventArgs args)
         {
             _serialService?.Dispose();
+            _audioMixService?.Dispose();
             try { _counterTimer?.Change(Timeout.Infinite, Timeout.Infinite); _counterTimer?.Dispose(); _counterTimer = null; } catch { }
         }
 
@@ -244,7 +284,7 @@ namespace ADC_Rec
         private void ProcessPendingPackets()
         {
             // UI refresh only; background drain feeds the plot manager at full speed
-            if (!_running) return;
+            if (!_running && !_replaying) return;
 
 
 
@@ -252,9 +292,16 @@ namespace ADC_Rec
             _ = DispatcherQueue.TryEnqueue(() =>
             {
                 bool anyDrawn = false;
+                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
+                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
+                    float norm = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetNormalizationGainForBits(bitsSnapshot[ch])
+                        : 1f;
+                    for (int i = 0; i < n; i++) _displayBuffers[ch][i] *= gain * norm;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
                     DrawChannel(canvas, _displayBuffers[ch], n);
                     if (n > 0) anyDrawn = true;
@@ -278,8 +325,35 @@ namespace ADC_Rec
                     UpdateBytesUi();
                 }
 
+                UpdateMeterUi();
+
                 if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
             });
+        }
+
+        private void UpdateMeterUi()
+        {
+            if (_audioMixService == null || _meterLeftRects.Count == 0 || _meterRightRects.Count == 0) return;
+            var left = _audioMixService.GetMeterLedsLeft();
+            var right = _audioMixService.GetMeterLedsRight();
+            for (int i = 0; i < MeterLedCount; i++)
+            {
+                UpdateMeterRect(_meterLeftRects[i], left[i], i);
+                UpdateMeterRect(_meterRightRects[i], right[i], i);
+            }
+        }
+
+        private void UpdateMeterRect(Rectangle rect, float lit, int index)
+        {
+            if (rect == null) return;
+            int thresholdRed = (int)Math.Ceiling(MeterLedCount * 0.9);
+            int thresholdYellow = (int)Math.Ceiling(MeterLedCount * 0.6);
+            var color = index >= thresholdRed
+                ? Microsoft.UI.Colors.Red
+                : index >= thresholdYellow
+                    ? Microsoft.UI.Colors.Yellow
+                    : Microsoft.UI.Colors.LimeGreen;
+            rect.Fill = new SolidColorBrush(lit > 0.5f ? color : Microsoft.UI.Colors.Black);
         }
 
         private void FlushLogsAndUpdateQueueStatus()
@@ -425,7 +499,7 @@ namespace ADC_Rec
                         _drainStartedLogged = true;
                         _logQueue.Enqueue("Drain loop started");
                     }
-                    if (!_running)
+                    if (!_running && !_replaying)
                     {
                         if (!_drainIdleLogged)
                         {
@@ -475,6 +549,7 @@ namespace ADC_Rec
                         continue;
                     }
                     _plotManager.AddPacketsBatch(batch, 0f, _plotBits);
+                    _audioMixService?.ProcessPackets(batch);
                     // Track processed packets for diagnostics
                     System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
 
@@ -795,6 +870,44 @@ namespace ADC_Rec
             catch (Exception ex) { _logQueue.Enqueue("PlotBits number change error: " + ex.Message); }
         }
 
+        private void GainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        {
+            if (_audioMixService == null) return;
+            var slider = sender as Slider;
+            if (slider == null) return;
+            float gain = (float)slider.Value;
+            if (slider == GainSlider0) { _audioMixService.SetChannelGain(0, gain); GainText0.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider1) { _audioMixService.SetChannelGain(1, gain); GainText1.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider2) { _audioMixService.SetChannelGain(2, gain); GainText2.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider3) { _audioMixService.SetChannelGain(3, gain); GainText3.Text = $"{gain:0.00}x"; }
+        }
+
+        private void InputBits_ValueChanged(object sender, NumberBoxValueChangedEventArgs e)
+        {
+            if (_audioMixService == null) return;
+            var box = sender as NumberBox;
+            if (box == null) return;
+            int bits = (int)Math.Round(box.Value);
+            bits = Math.Max(8, Math.Min(24, bits));
+            if (box == InputBits0) _audioMixService.SetChannelInputBits(0, bits);
+            else if (box == InputBits1) _audioMixService.SetChannelInputBits(1, bits);
+            else if (box == InputBits2) _audioMixService.SetChannelInputBits(2, bits);
+            else if (box == InputBits3) _audioMixService.SetChannelInputBits(3, bits);
+        }
+
+        private void PanSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        {
+            if (_audioMixService == null) return;
+            var slider = sender as Slider;
+            if (slider == null) return;
+            float pan = (float)slider.Value;
+            string panText = pan < -0.05f ? $"{Math.Abs(pan):0.00} L" : pan > 0.05f ? $"{pan:0.00} R" : "Center";
+            if (slider == PanSlider0) { _audioMixService.SetChannelPan(0, pan); PanText0.Text = panText; }
+            else if (slider == PanSlider1) { _audioMixService.SetChannelPan(1, pan); PanText1.Text = panText; }
+            else if (slider == PanSlider2) { _audioMixService.SetChannelPan(2, pan); PanText2.Text = panText; }
+            else if (slider == PanSlider3) { _audioMixService.SetChannelPan(3, pan); PanText3.Text = panText; }
+        }
+
         private void UpdateBytesUi()
         {
             try
@@ -846,14 +959,17 @@ namespace ADC_Rec
                     string path = System.IO.Path.Combine(folder, $"ADCRec_{DateTime.Now:yyyyMMdd_HHmmss}.bin");
                     var fs = new System.IO.FileStream(path, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.Read);
                     lock (_recordLock) { _recordWriter = new System.IO.BinaryWriter(fs); }
+                    string wavPath = _audioMixService.StartWavWrite(folder);
                     _recording = true;
                     if (RecordButton != null) RecordButton.Content = "Stop Record";
-                    AddLog($"Recording to {path}");
+                    AddLog($"Recording raw: {path}");
+                    AddLog($"Recording mix WAV: {wavPath}");
                 }
                 else
                 {
                     lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
                     _recording = false;
+                    _audioMixService.StopWavWrite();
                     if (RecordButton != null) RecordButton.Content = "Start Record";
                     AddLog("Recording stopped");
                 }
@@ -874,6 +990,15 @@ namespace ADC_Rec
                 if (files == null || files.Length == 0) { AddLog("No recordings found in Documents"); return; }
                 var path = files.OrderByDescending(f => f).First();
                 AddLog($"Replaying {path}");
+                string wavPath = _audioMixService.StartWavWrite(folder);
+                AddLog($"Remix WAV: {wavPath}");
+                if (!_running)
+                {
+                    StartBackgroundDrain();
+                    StartUiTimer();
+                    StartCountersTimer();
+                    _audioMixService?.StartPlayback();
+                }
                 _replaying = true;
                 System.Threading.Tasks.Task.Run(async () =>
                 {
@@ -899,6 +1024,14 @@ namespace ADC_Rec
                     }
                     finally
                     {
+                        _audioMixService.StopWavWrite();
+                        if (!_running)
+                        {
+                            StopBackgroundDrain();
+                            StopUiTimer();
+                            StopCountersTimer();
+                            _audioMixService?.StopPlayback();
+                        }
                         _replaying = false;
                     }
                 });
@@ -970,6 +1103,7 @@ namespace ADC_Rec
             StartCountersTimer();
             AddLog("Capture started");
             StatusTextBlock.Text = "Running";
+            _audioMixService?.StartPlayback();
         }
 
         private void StopButton_Click(object sender, RoutedEventArgs e)
@@ -982,11 +1116,13 @@ namespace ADC_Rec
             if (_recording) {
                 lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
                 _recording = false;
+                _audioMixService.StopWavWrite();
                 if (RecordButton != null) RecordButton.Content = "Start Record";
                 AddLog("Recording stopped (capture stopped)");
             }
             AddLog("Capture stopped");
             StatusTextBlock.Text = "Stopped";
+            _audioMixService?.StopPlayback();
         }
     }
 }
