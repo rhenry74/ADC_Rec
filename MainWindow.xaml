@@ -42,7 +42,7 @@
 
             <TextBlock Text="Plot bits (8-24)" />
             <StackPanel Orientation="Horizontal" Spacing="8">
-                <NumberBox x:Name="PlotBitsNumberBox" Width="90" Value="16" Minimum="8" Maximum="24" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="PlotBitsNumberBox_ValueChanged" />
+<NumberBox x:Name="PlotBitsNumberBox" Width="90" Value="16" Minimum="8" Maximum="16" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="PlotBitsNumberBox_ValueChanged" />
                 <TextBlock Text="bits" VerticalAlignment="Center" Margin="4,0,0,0" />
             </StackPanel>
             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -98,7 +98,7 @@
                         </Grid>
                         <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
                             <TextBlock Text="CH0 Input Bits" FontWeight="SemiBold" />
-                            <NumberBox x:Name="InputBits0" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <NumberBox x:Name="InputBits0" Minimum="8" Maximum="16" Value="16" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
                             <TextBlock Text="CH0 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider0" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText0" Text="1.00x" />
@@ -117,7 +117,7 @@
                         </Grid>
                         <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
                             <TextBlock Text="CH1 Input Bits" FontWeight="SemiBold" />
-                            <NumberBox x:Name="InputBits1" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <NumberBox x:Name="InputBits1" Minimum="8" Maximum="16" Value="16" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
                             <TextBlock Text="CH1 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider1" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText1" Text="1.00x" />
@@ -136,7 +136,7 @@
                         </Grid>
                         <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
                             <TextBlock Text="CH2 Input Bits" FontWeight="SemiBold" />
-                            <NumberBox x:Name="InputBits2" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <NumberBox x:Name="InputBits2" Minimum="8" Maximum="16" Value="16" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
                             <TextBlock Text="CH2 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider2" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText2" Text="1.00x" />
@@ -155,7 +155,7 @@
                         </Grid>
                         <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="6">
                             <TextBlock Text="CH3 Input Bits" FontWeight="SemiBold" />
-                            <NumberBox x:Name="InputBits3" Minimum="8" Maximum="24" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
+                            <NumberBox x:Name="InputBits3" Minimum="8" Maximum="16" Value="16" SmallChange="1" SpinButtonPlacementMode="Inline" ValueChanged="InputBits_ValueChanged" />
                             <TextBlock Text="CH3 Gain" FontWeight="SemiBold" />
                             <Slider x:Name="GainSlider3" Minimum="0" Maximum="1000" Value="1" SmallChange="0.1" StepFrequency="0.1" IsThumbToolTipEnabled="True" ValueChanged="GainSlider_ValueChanged" />
                             <TextBlock x:Name="GainText3" Text="1.00x" />

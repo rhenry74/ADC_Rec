@@ -6,6 +6,6 @@ namespace ADC_Rec.Models
         public const int BufferLen = 8;
 
         // Samples[ channel, sampleIndex ] where sampleIndex in [0..BufferLen-1]
-        public uint[,] Samples = new uint[NumChannels, BufferLen];
+        public ushort[,] Samples = new ushort[NumChannels, BufferLen];
     }
 }

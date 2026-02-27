@@ -12,7 +12,7 @@ namespace ADC_Rec.Services
         private const int InputSampleRate = 44100;
         private const int OutputSampleRate = 44100;
         private const int OutputChannels = 2;
-        private const int BitsPerSample = 24;
+        private const int BitsPerSample = 16;
         private const int LedCount = 20;
 
         private readonly object _lock = new object();
@@ -61,7 +61,7 @@ namespace ADC_Rec.Services
         public void SetChannelInputBits(int ch, int bits)
         {
             if (ch < 0 || ch >= Packet.NumChannels) return;
-            bits = Math.Max(8, Math.Min(24, bits));
+            bits = Math.Max(8, Math.Min(16, bits));
             lock (_lock) { _channelInputBits[ch] = bits; }
         }
 
@@ -206,7 +206,7 @@ namespace ADC_Rec.Services
                     float mixR = 0f;
                     for (int ch = 0; ch < Packet.NumChannels; ch++)
                     {
-                        uint raw = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                        uint raw = pkt.Samples[ch, i];
                         float sample = ConvertUnsignedToFloat(raw, bits[ch]);
                         float gain = gains[ch];
                         float pan = pans[ch];
@@ -271,11 +271,9 @@ namespace ADC_Rec.Services
             int toWrite = Math.Min(_wavSampleBuffer.Count, 4096);
             for (int i = 0; i < toWrite; i++)
             {
-                int v = FloatTo24Bit(_wavSampleBuffer[i]);
-                _wavWriter.Write((byte)(v & 0xFF));
-                _wavWriter.Write((byte)((v >> 8) & 0xFF));
-                _wavWriter.Write((byte)((v >> 16) & 0xFF));
-                _wavDataBytes += 3;
+                short v = (short)FloatTo16Bit(_wavSampleBuffer[i]);
+                _wavWriter.Write(v);
+                _wavDataBytes += 2;
             }
             _wavSampleBuffer.RemoveRange(0, toWrite);
             // Flush to ensure data is written to disk
@@ -326,7 +324,7 @@ namespace ADC_Rec.Services
 
         private static float ConvertUnsignedToFloat(uint raw, int inputBits)
         {
-            int bits = Math.Max(1, Math.Min(24, inputBits));
+            int bits = Math.Max(1, Math.Min(16, inputBits));
             int maxVal = (1 << bits) - 1;
             float mid = maxVal / 2f;
             float centered = raw - mid;
@@ -335,25 +333,24 @@ namespace ADC_Rec.Services
 
         public static float GetNormalizationGainForBits(int inputBits)
         {
-            int bits = Math.Max(1, Math.Min(24, inputBits));
+            int bits = Math.Max(1, Math.Min(16, inputBits));
             int maxVal = (1 << bits) - 1;
             float mid = maxVal / 2f;
             return 1f / Math.Max(1f, mid);
         }
 
-        public static float GetScaleTo24BitCounts(int inputBits)
+        public static float GetScaleTo16BitCounts(int inputBits)
         {
-            int bits = Math.Max(1, Math.Min(24, inputBits));
-            int shift = 24 - bits;
+            int bits = Math.Max(1, Math.Min(16, inputBits));
+            int shift = 16 - bits;
             return (float)(1 << Math.Max(0, shift));
         }
 
-        private static int FloatTo24Bit(float sample)
+        private static int FloatTo16Bit(float sample)
         {
             sample = Math.Max(-1f, Math.Min(1f, sample));
-            int v = (int)Math.Round(sample * 8388607f);
-            if (v < 0) v += 1 << 24;
-            return v & 0x00FFFFFF;
+            int v = (int)Math.Round(sample * 32767f);
+            return v;
         }
 
         private static float ApplyDcBlock(float sample, ref float state)

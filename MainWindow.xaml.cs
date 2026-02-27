@@ -84,7 +84,7 @@ namespace ADC_Rec
 
         // Reusable display buffers to avoid allocations
         private float[][] _displayBuffers = new float[Models.Packet.NumChannels][];
-        private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
+        private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 16-bit samples for hover
         private long[] _bytesPerChannel = new long[Models.Packet.NumChannels]; // parsed bytes per channel (cumulative)
         private uint[] _hoverRaw = new uint[1];
         private readonly System.Collections.Generic.List<Rectangle> _meterLeftRects = new System.Collections.Generic.List<Rectangle>();
@@ -235,18 +235,18 @@ namespace ADC_Rec
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
                     float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
+                    float scaleTo16 = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetScaleTo16BitCounts(bitsSnapshot[ch])
                         : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
+                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo16);
                 }
             });
         }
 
         private int ConvertRawToUnsigned(uint raw)
         {
-            return (int)(raw & 0x00FFFFFFu);
+            return (int)(raw & 0xFFFFu);
         }
 
         private void MainWindow_Activated(object sender, Microsoft.UI.Xaml.WindowActivatedEventArgs e)
@@ -297,10 +297,10 @@ namespace ADC_Rec
             _packetQueue.Enqueue(pkt);
             System.Threading.Interlocked.Increment(ref _pendingPacketCount);
 
-            // Track parsed bytes per channel (each sample is 3 bytes)
+                    // Track parsed bytes per channel (each sample is 2 bytes)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
             {
-                System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 3);
+                System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 2);
             }
 
             // Enforce bounded queue immediately to avoid unbounded memory growth when parsing is faster than drain
@@ -358,11 +358,11 @@ namespace ADC_Rec
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
                     float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
+                    float scaleTo16 = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetScaleTo16BitCounts(bitsSnapshot[ch])
                         : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
+                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo16);
                     if (n > 0) anyDrawn = true;
                 }
 
@@ -721,7 +721,7 @@ namespace ADC_Rec
 
                 float min, max;
                 float mid = 0f;
-                int bits = Math.Max(1, Math.Min(24, _plotBits));
+                int bits = Math.Max(1, Math.Min(16, _plotBits));
                 int maxValue = (1 << bits) - 1;
                 if (_fitToData)
                 {

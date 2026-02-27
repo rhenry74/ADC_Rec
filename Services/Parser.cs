@@ -18,7 +18,7 @@ namespace ADC_Rec.Services
 
         private readonly List<byte> _buf = new List<byte>();
         private const int HeaderSize = 2;
-        private const int PayloadSize = 4 * 8 * 3; // NUM_CHANNELS * BUFFER_LEN * 3
+        private const int PayloadSize = 4 * 8 * 2; // NUM_CHANNELS * BUFFER_LEN * 2
         private const int PacketSize = HeaderSize + PayloadSize;
 
         private long _parsedPacketCount = 0;
@@ -97,7 +97,7 @@ namespace ADC_Rec.Services
             {
                 for (int i = 0; i < Packet.BufferLen; i++)
                 {
-                    uint v = (uint)(payload[off++] | (payload[off++] << 8) | (payload[off++] << 16));
+                    ushort v = (ushort)(payload[off++] | (payload[off++] << 8));
                     pkt.Samples[ch, i] = v;
                 }
             }
