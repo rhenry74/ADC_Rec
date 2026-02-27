@@ -1238,7 +1238,7 @@ namespace ADC_Rec
                             
                             // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
                             // Use _rateRatioSmoothed to match what's displayed on screen
-                            int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 1.0 ? 15 : 16;
+                            int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
                             await System.Threading.Tasks.Task.Delay(delayMs).ConfigureAwait(false);
                         }
                         _logQueue.Enqueue($"Replay finished: {path}");
