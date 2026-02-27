@@ -41,7 +41,6 @@ namespace ADC_Rec
         private System.Threading.Timer? _counterTimer = null; // updates bytes-per-channel UI every 200ms
         private int _displayWindowSamples = 44100; // default 1s
         private int _sampleRate = 44100; // default sample rate
-        private int _plotBits = 16; // default plot bits (user-selectable)
         private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
         private const int MaxPacketBatchPerTick = 64;
         private const int MaxPacketQueue = 4096; // if exceeded, drop oldest packets to keep memory bounded
@@ -140,8 +139,6 @@ namespace ADC_Rec
             // initialize counters and counter timer (stopped until capture starts)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _bytesPerChannel[ch] = 0;
             _counterTimer = new System.Threading.Timer(_ => UpdateBytesUi(), null, Timeout.Infinite, 200);
-            // Plot bits NumberBox initialized below (spinner control)
-            if (PlotBitsNumberBox != null) PlotBitsNumberBox.Value = _plotBits;
 
             // Fit-to-data checkbox hookup (if exists)
             if (FitToDataCheck != null)
@@ -172,13 +169,6 @@ namespace ADC_Rec
                 UiEnabledCheck.IsChecked = _uiEnabled;
                 UiEnabledCheck.Checked += (s, e) => { _uiEnabled = true; _logQueue.Enqueue("UI: ON"); };
                 UiEnabledCheck.Unchecked += (s, e) => { _uiEnabled = false; _logQueue.Enqueue("UI: OFF (max performance)"); };
-            }
-
-            // PlotBits numberbox and ReverseBytes checkbox hookup (if exists)
-            if (PlotBitsNumberBox != null)
-            {
-                PlotBitsNumberBox.Value = _plotBits;
-                // ValueChanged is wired in XAML; additional hookup not required here.
             }
 
             // Show hover/last-value labels all the time (initialize)
@@ -641,7 +631,7 @@ namespace ADC_Rec
                         await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
                         continue;
                     }
-                    _plotManager.AddPacketsBatch(batch, 0f, _plotBits);
+                    _plotManager.AddPacketsBatch(batch, 0f, 16);
                     _audioMixService?.ProcessPackets(batch);
                     // Track processed packets for diagnostics
                     System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
@@ -663,13 +653,11 @@ namespace ADC_Rec
                                         {
                                             for (int i = 0; i < Models.Packet.BufferLen; i++)
                                             {
-                                                uint v = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                                                uint v = pkt.Samples[ch, i];
                                                 byte b0 = (byte)(v & 0xFF);
                                                 byte b1 = (byte)((v >> 8) & 0xFF);
-                                                byte b2 = (byte)((v >> 16) & 0xFF);
                                                 _recordWriter.Write(b0);
                                                 _recordWriter.Write(b1);
-                                                _recordWriter.Write(b2);
                                             }
                                         }
                                     }
@@ -720,12 +708,13 @@ namespace ADC_Rec
                 if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
 
                 float min, max;
-                float mid = 0f;
-                int bits = Math.Max(1, Math.Min(16, _plotBits));
+                float mid;
+                int bits = 16; // Fixed 16-bit data
                 int maxValue = (1 << bits) - 1;
+
                 if (_fitToData)
                 {
-                    // Autoscale to snapshot data range using unsigned values, then center around midpoint (AC-coupled)
+                    // Autoscale: find min/max of current data and center around its midpoint
                     min = float.MaxValue; max = float.MinValue;
                     for (int i = 0; i < length; i++)
                     {
@@ -744,9 +733,10 @@ namespace ADC_Rec
                 }
                 else
                 {
-                    // Use a fixed plotting range based on selected bit depth: [0 .. 2^bits-1]
-                    min = 0f;
-                    max = maxValue;
+                    // Fixed range: use full 16-bit range centered at 32768
+                    mid = maxValue / 2f; // 32768 - fixed center of 16-bit unsigned range
+                    min = -maxValue / 2f;
+                    max = maxValue / 2f;
                 }
                 float range = max - min;
                 if (range <= 0f) range = 1f; // fall back to sensible range to avoid div0
@@ -778,7 +768,8 @@ namespace ADC_Rec
                         uint raw = (uint)samples[k] & 0x00FFFFFFu;
                         int vUnsigned = ConvertRawToUnsigned(raw);
                         float v = (float)vUnsigned * scale;
-                        if (_fitToData) v -= mid;
+                        // Subtract midpoint to center around zero - always needed for signed display
+                        v -= mid;
                         if (v < bmin) bmin = v;
                         if (v > bmax) bmax = v;
                     }
@@ -818,7 +809,7 @@ namespace ADC_Rec
                     uint rawLast = (uint)samples[length - 1] & 0x00FFFFFFu;
                     int vLast = ConvertRawToUnsigned(rawLast);
                     float last = (float)vLast * scale;
-                    if (_fitToData) last -= mid;
+                    last -= mid; // Always center around midpoint (AC-coupled view)
                     double xLast = w; // most recent sample drawn at right edge
                     double yLast = h - ((last - min) / range) * h;
                     // Use cached brush
@@ -858,21 +849,20 @@ namespace ADC_Rec
             if (_packetQueue.TryDequeue(out var pkt))
             {
                 System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
-                int payloadLen = Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
+                int payloadLen = Models.Packet.NumChannels * Models.Packet.BufferLen * 2;
                 int totalLen = 2 + payloadLen;
                 _logQueue.Enqueue($"Packet dump (raw {totalLen} bytes):");
                 // Header bytes on their own line
                 _logQueue.Enqueue("0x55,0xAA,");
-                // Per-channel samples (3 bytes LSB-first) with integer value shown
+                // Per-channel samples (2 bytes LSB-first for 16-bit) with integer value shown
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     for (int i = 0; i < Models.Packet.BufferLen; i++)
                     {
-                        uint v = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                        uint v = pkt.Samples[ch, i];
                         byte b0 = (byte)(v & 0xFF);
                         byte b1 = (byte)((v >> 8) & 0xFF);
-                        byte b2 = (byte)((v >> 16) & 0xFF);
-                        _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2},0x{b2:X2}, = CH{ch}, {v}");
+                        _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2}, = CH{ch}, {v}");
                     }
                     // separator line between channels for readability
                     _logQueue.Enqueue(string.Empty);
@@ -883,7 +873,7 @@ namespace ADC_Rec
             // Fallback: Dump a compact textual snapshot of recent samples for each channel
             _ = DispatcherQueue.TryEnqueue(() =>
             {
-                int dumpSamples = Math.Min(128, _displayWindowSamples);
+                int dumpSamples = Math.Min(Models.Packet.BufferLen, _displayWindowSamples);
                 AddLog($"Dumping last {dumpSamples} samples per channel (most recent last):");
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
@@ -940,31 +930,6 @@ namespace ADC_Rec
             }
         }
 
-        private void PlotBitsNumberBox_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.NumberBoxValueChangedEventArgs e)
-        {
-            try
-            {
-                int bits = (int)Math.Round(e.NewValue);
-                bits = Math.Max(8, Math.Min(24, bits));
-                if (bits == _plotBits) return;
-                _plotBits = bits;
-                _logQueue.Enqueue($"Plot bits set to {_plotBits} (spinner)");
-                // If Fit-to-data is enabled, autoscale will hide the effect of changing bit depth. Disable it so the change is visible.
-                try
-                {
-                    if (FitToDataCheck != null && FitToDataCheck.IsChecked == true)
-                    {
-                        FitToDataCheck.IsChecked = false;
-                        _fitToData = false;
-                        _logQueue.Enqueue("Fit to data: OFF (disabled to apply plot bits)");
-                    }
-                }
-                catch { }
-                ForceRedraw();
-            }
-            catch (Exception ex) { _logQueue.Enqueue("PlotBits number change error: " + ex.Message); }
-        }
-
         private void GainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
         {
             if (_audioMixService == null) return;
@@ -975,19 +940,6 @@ namespace ADC_Rec
             else if (slider == GainSlider1) { _audioMixService.SetChannelGain(1, gain); GainText1.Text = $"{gain:0.00}x"; }
             else if (slider == GainSlider2) { _audioMixService.SetChannelGain(2, gain); GainText2.Text = $"{gain:0.00}x"; }
             else if (slider == GainSlider3) { _audioMixService.SetChannelGain(3, gain); GainText3.Text = $"{gain:0.00}x"; }
-        }
-
-        private void InputBits_ValueChanged(object sender, NumberBoxValueChangedEventArgs e)
-        {
-            if (_audioMixService == null) return;
-            var box = sender as NumberBox;
-            if (box == null) return;
-            int bits = (int)Math.Round(box.Value);
-            bits = Math.Max(8, Math.Min(24, bits));
-            if (box == InputBits0) _audioMixService.SetChannelInputBits(0, bits);
-            else if (box == InputBits1) _audioMixService.SetChannelInputBits(1, bits);
-            else if (box == InputBits2) _audioMixService.SetChannelInputBits(2, bits);
-            else if (box == InputBits3) _audioMixService.SetChannelInputBits(3, bits);
         }
 
         private void PanSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
@@ -1206,7 +1158,7 @@ namespace ADC_Rec
                 {
                     try
                     {
-                        int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
+                        int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 2;
                         using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
                         var buf = new byte[pktLen];
                         

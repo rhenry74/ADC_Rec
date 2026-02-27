@@ -18,7 +18,6 @@ namespace ADC_Rec.Services
         private readonly object _lock = new object();
         private readonly float[] _channelGains = new float[Packet.NumChannels];
         private readonly float[] _channelPans = new float[Packet.NumChannels];
-        private readonly int[] _channelInputBits = new int[Packet.NumChannels];
 
         private WaveOutEvent? _waveOut;
         private BufferedWaveProvider? _playbackBuffer;
@@ -54,15 +53,7 @@ namespace ADC_Rec.Services
             {
                 _channelGains[ch] = 1.0f;
                 _channelPans[ch] = 0.0f;
-                _channelInputBits[ch] = 12;
             }
-        }
-
-        public void SetChannelInputBits(int ch, int bits)
-        {
-            if (ch < 0 || ch >= Packet.NumChannels) return;
-            bits = Math.Max(8, Math.Min(16, bits));
-            lock (_lock) { _channelInputBits[ch] = bits; }
         }
 
         public void SetChannelGain(int ch, float gain)
@@ -80,9 +71,10 @@ namespace ADC_Rec.Services
 
         public int[] GetChannelInputBitsSnapshot()
         {
-            var bits = new int[Packet.NumChannels];
-            lock (_lock) { Array.Copy(_channelInputBits, bits, Packet.NumChannels); }
-            return bits;
+            // Return default 16-bit for all channels (not 0!)
+            int[] result = new int[Packet.NumChannels];
+            for (int i = 0; i < result.Length; i++) result[i] = 16;
+            return result;
         }
 
         public void SetChannelPan(int ch, float pan)
@@ -183,12 +175,10 @@ namespace ADC_Rec.Services
 
             float[] gains = new float[Packet.NumChannels];
             float[] pans = new float[Packet.NumChannels];
-            int[] bits = new int[Packet.NumChannels];
             lock (_lock)
             {
                 Array.Copy(_channelGains, gains, Packet.NumChannels);
                 Array.Copy(_channelPans, pans, Packet.NumChannels);
-                Array.Copy(_channelInputBits, bits, Packet.NumChannels);
                 // read once per batch for consistency
             }
             bool dcEnabled;
@@ -207,7 +197,7 @@ namespace ADC_Rec.Services
                     for (int ch = 0; ch < Packet.NumChannels; ch++)
                     {
                         uint raw = pkt.Samples[ch, i];
-                        float sample = ConvertUnsignedToFloat(raw, bits[ch]);
+                        float sample = ConvertUnsignedToFloat(raw, 16); // Fixed 16-bit
                         float gain = gains[ch];
                         float pan = pans[ch];
                         float angle = (pan + 1f) * 0.25f * (float)Math.PI;
