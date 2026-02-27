@@ -24,12 +24,14 @@ namespace ADC_Rec.Services
         private BufferedWaveProvider? _playbackBuffer;
         private bool _playbackStarted;
 
-        private BufferedWaveProvider? _wavBuffer;
-        private MediaFoundationResampler? _wavResampler;
+        // WAV writing - separate from playback to avoid race conditions
+        private readonly object _wavLock = new object();
+        private List<float> _wavSampleBuffer = new List<float>();
 
         private BinaryWriter? _wavWriter;
         private bool _writeWav;
         private long _wavDataBytes;
+        private const int WavBufferSamplesMax = 44100 * 2 * 8; // 8 seconds max buffer
 
         private float _dcLeft;
         private float _dcRight;
@@ -116,20 +118,10 @@ namespace ADC_Rec.Services
             var monitorFormat = WaveFormat.CreateIeeeFloatWaveFormat(InputSampleRate, OutputChannels);
             _playbackBuffer = new BufferedWaveProvider(monitorFormat)
             {
-                BufferLength = InputSampleRate * OutputChannels * sizeof(float),
+                BufferLength = InputSampleRate * OutputChannels * sizeof(float) * 4, // 4 seconds
                 DiscardOnBufferOverflow = true
             };
 
-            var wavInputFormat = WaveFormat.CreateIeeeFloatWaveFormat(InputSampleRate, OutputChannels);
-            _wavBuffer = new BufferedWaveProvider(wavInputFormat)
-            {
-                BufferLength = InputSampleRate * OutputChannels * sizeof(float),
-                DiscardOnBufferOverflow = true
-            };
-            _wavResampler = new MediaFoundationResampler(_wavBuffer, new WaveFormat(OutputSampleRate, 32, OutputChannels))
-            {
-                ResamplerQuality = 60
-            };
             _waveOut = new WaveOutEvent();
             _waveOut.Init(_playbackBuffer);
             _waveOut.Play();
@@ -143,9 +135,6 @@ namespace ADC_Rec.Services
             try { _waveOut?.Dispose(); } catch { }
             _waveOut = null;
             _playbackBuffer = null;
-            _wavResampler?.Dispose();
-            _wavResampler = null;
-            _wavBuffer = null;
         }
 
         public string StartWavWrite(string folder)
@@ -156,6 +145,11 @@ namespace ADC_Rec.Services
             var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
             _wavWriter = new BinaryWriter(fs);
             _wavDataBytes = 0;
+            // Clear and initialize the WAV buffer
+            lock (_wavLock)
+            {
+                _wavSampleBuffer.Clear();
+            }
             WriteWavHeaderPlaceholder(_wavWriter);
             _writeWav = true;
             return path;
@@ -167,6 +161,15 @@ namespace ADC_Rec.Services
             if (_wavWriter == null) return;
             try
             {
+                // Flush any remaining samples in the buffer
+                lock (_wavLock)
+                {
+                    while (_wavSampleBuffer.Count > 0)
+                    {
+                        FlushWavBuffer();
+                    }
+                    _wavSampleBuffer.Clear();
+                }
                 UpdateWavHeader(_wavWriter, _wavDataBytes);
             }
             catch { }
@@ -242,28 +245,41 @@ namespace ADC_Rec.Services
             var bytes = new byte[outputSamples.Count * sizeof(float)];
             Buffer.BlockCopy(outputSamples.ToArray(), 0, bytes, 0, bytes.Length);
             _playbackBuffer.AddSamples(bytes, 0, bytes.Length);
-            _wavBuffer?.AddSamples(bytes, 0, bytes.Length);
         }
 
         private void WriteWav(List<float> outputSamples)
         {
             if (!_writeWav || _wavWriter == null) return;
-            if (_wavResampler == null) return;
-            var resampled = new float[outputSamples.Count];
-            int bytesNeeded = resampled.Length * sizeof(float);
-            var resampleBytes = new byte[bytesNeeded];
-            int bytesRead = _wavResampler.Read(resampleBytes, 0, bytesNeeded);
-            if (bytesRead <= 0) return;
-            int samplesRead = bytesRead / sizeof(float);
-            Buffer.BlockCopy(resampleBytes, 0, resampled, 0, bytesRead);
-            for (int i = 0; i < samplesRead; i++)
+
+            // Buffer samples for WAV writing (thread-safe)
+            lock (_wavLock)
             {
-                int v = FloatTo24Bit(resampled[i]);
+                _wavSampleBuffer.AddRange(outputSamples);
+
+                // Write in chunks to avoid blocking too long
+                while (_wavSampleBuffer.Count >= 4096)
+                {
+                    FlushWavBuffer();
+                }
+            }
+        }
+
+        private void FlushWavBuffer()
+        {
+            if (_wavWriter == null || _wavSampleBuffer.Count == 0) return;
+
+            int toWrite = Math.Min(_wavSampleBuffer.Count, 4096);
+            for (int i = 0; i < toWrite; i++)
+            {
+                int v = FloatTo24Bit(_wavSampleBuffer[i]);
                 _wavWriter.Write((byte)(v & 0xFF));
                 _wavWriter.Write((byte)((v >> 8) & 0xFF));
                 _wavWriter.Write((byte)((v >> 16) & 0xFF));
                 _wavDataBytes += 3;
             }
+            _wavSampleBuffer.RemoveRange(0, toWrite);
+            // Flush to ensure data is written to disk
+            _wavWriter.Flush();
         }
 
         private void UpdateMeters(List<float> outputSamples)

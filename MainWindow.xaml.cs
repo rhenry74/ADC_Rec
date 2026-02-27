@@ -1143,18 +1143,57 @@ namespace ADC_Rec
             }
         }
 
-        private void ReplayButton_Click(object sender, RoutedEventArgs e)
+        private CancellationTokenSource? _replayCts;
+
+        private async void ReplayButton_Click(object sender, RoutedEventArgs e)
         {
-            // Find most recent recording in Documents and replay it into the parser (offline)
+            // If already replaying, stop it
+            if (_replaying)
+            {
+                _replayCts?.Cancel();
+                AddLog("Replay stopped");
+                return;
+            }
+
+            // Use file picker to let user choose which recording to replay
             try
             {
-                string folder = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                var files = System.IO.Directory.GetFiles(folder, "ADCRec_*.bin");
-                if (files == null || files.Length == 0) { AddLog("No recordings found in Documents"); return; }
-                var path = files.OrderByDescending(f => f).First();
+                // Don't allow replay while COM is connected
+                if (_serialService?.IsConnected == true)
+                {
+                    AddLog("Cannot replay while COM port is connected");
+                    return;
+                }
+
+                // If recording, stop it first
+                if (_recording)
+                {
+                    lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
+                    _recording = false;
+                    _audioMixService.StopWavWrite();
+                    if (RecordButton != null) RecordButton.Content = "Start Record";
+                    AddLog("Recording stopped for replay");
+                }
+
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+                var picker = new Windows.Storage.Pickers.FileOpenPicker
+                {
+                    ViewMode = Windows.Storage.Pickers.PickerViewMode.List,
+                    SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.DocumentsLibrary
+                };
+                picker.FileTypeFilter.Add(".bin");
+                WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+                var file = await picker.PickSingleFileAsync();
+                if (file == null) return;
+
+                string path = file.Path;
                 AddLog($"Replaying {path}");
-                string wavPath = _audioMixService.StartWavWrite(folder);
-                AddLog($"Remix WAV: {wavPath}");
+                
+                // Create cancellation token for this replay
+                _replayCts = new CancellationTokenSource();
+                var token = _replayCts.Token;
+
                 if (!_running)
                 {
                     StartBackgroundDrain();
@@ -1170,14 +1209,37 @@ namespace ADC_Rec
                         int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
                         using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
                         var buf = new byte[pktLen];
-                        while (true)
+                        
+                        // Calculate packets per second for real-time pacing
+                        // Each packet has BufferLen (8) samples per channel, 4 channels = 32 raw samples
+                        // After mixing to stereo: BufferLen (8) samples × 2 channels = 16 stereo samples
+                        // At 44100 Hz: 44100 / 16 = 2756 packets per second for 1 second of audio
+                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * 2);
+                        // Use batch size that gives us reasonable delay intervals (e.g., 50ms worth)
+                        int batchSize = Math.Max(1, packetsPerSecond / 20); // 1/20 second worth = ~138 packets
+                        
+                        while (!token.IsCancellationRequested)
                         {
-                            int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
-                            if (read < pktLen) break;
-                            _parser.Feed(buf);
-                            // approximate real-time pacing based on sample rate and buffer length
-                            int pps = Math.Max(1, _sampleRate / Models.Packet.BufferLen);
-                            await System.Threading.Tasks.Task.Delay(1000 / pps).ConfigureAwait(false);
+                            // Read a batch of packets
+                            for (int i = 0; i < batchSize; i++)
+                            {
+                                int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
+                                if (read < pktLen) 
+                                {
+                                    // Final few packets - process them and exit
+                                    if (read > 0) _parser.Feed(buf);
+                                    break;
+                                }
+                                _parser.Feed(buf);
+                            }
+                            
+                            // Check if we've reached end of file
+                            if (fs.Position >= fs.Length) break;
+                            
+                            // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
+                            // Use _rateRatioSmoothed to match what's displayed on screen
+                            int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 1.0 ? 15 : 16;
+                            await System.Threading.Tasks.Task.Delay(delayMs).ConfigureAwait(false);
                         }
                         _logQueue.Enqueue($"Replay finished: {path}");
                     }
@@ -1187,7 +1249,6 @@ namespace ADC_Rec
                     }
                     finally
                     {
-                        _audioMixService.StopWavWrite();
                         if (!_running)
                         {
                             StopBackgroundDrain();
