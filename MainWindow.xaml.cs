@@ -69,6 +69,19 @@ namespace ADC_Rec
         private const int DrainHighWaterMark = MaxPacketQueue;
         private const int DrainTargetQueue = MaxPacketQueue / 2;
 
+        // Rate/health diagnostics (compact UI)
+        private long _lastRateTick = Environment.TickCount;
+        private long _lastRateBytesTotal = 0;
+        private double _lastRateRatio = 0;
+        private double _lastPlaybackBufferMs = 0;
+        private double _minPlaybackBufferMs = 0;
+        private long _lastRateParsedPkts = 0;
+        private double _rateRatioSmoothed = 0;
+        private int _lastQueueCount = 0;
+        private long _queueGrowthAccum = 0;
+        private int _queueGrowthSamples = 0;
+        private int _bufferSampleCount = 0;
+
         // Reusable display buffers to avoid allocations
         private float[][] _displayBuffers = new float[Models.Packet.NumChannels][];
         private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
@@ -404,7 +417,12 @@ namespace ADC_Rec
             }
 
             // update queue count display
-            try { QueueTextBlock.Text = $"Queue: {System.Threading.Interlocked.Add(ref _pendingPacketCount, 0)}"; } catch { }
+            try
+            {
+                int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+                UpdateCompactHealthText(queueCount);
+            }
+            catch { }
 
             _lastLogFlushTick = now;
         }
@@ -941,6 +959,7 @@ namespace ADC_Rec
                     long v = System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], 0);
                     sb.Append($" ch{ch}={v}");
                 }
+                UpdateRateHealth(parsedPkts);
                 long dropped = System.Threading.Interlocked.Add(ref _droppedPacketCount, 0);
                 long processed = System.Threading.Interlocked.Add(ref _processedPacketCount, 0);
                 int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
@@ -960,9 +979,76 @@ namespace ADC_Rec
                     QueueTextBlock.Text = $"Queue: {System.Threading.Interlocked.Add(ref _pendingPacketCount, 0)}";
                     DroppedTextBlock.Text = $"Dropped: {dropped}";
                     DiagTextBlock.Text = diag;
+                    UpdateCompactHealthText(queueCount);
                 });
             }
             catch { }
+        }
+
+        private void UpdateRateHealth(long parsedPkts)
+        {
+            int now = Environment.TickCount;
+            int elapsedMs = unchecked(now - (int)_lastRateTick);
+            if (elapsedMs < 500) return;
+
+            long pktDelta = parsedPkts - _lastRateParsedPkts;
+            double actualPacketsPerSec = elapsedMs > 0 ? pktDelta * 1000.0 / elapsedMs : 0;
+            double expectedPacketsPerSec = Math.Max(1.0, _sampleRate / (double)Models.Packet.BufferLen);
+            _lastRateRatio = expectedPacketsPerSec > 0 ? actualPacketsPerSec / expectedPacketsPerSec : 0;
+            _lastRateParsedPkts = parsedPkts;
+            _lastRateTick = now;
+
+            if (_rateRatioSmoothed <= 0) _rateRatioSmoothed = _lastRateRatio;
+            else _rateRatioSmoothed = (_rateRatioSmoothed * 0.8) + (_lastRateRatio * 0.2);
+
+            _lastPlaybackBufferMs = _audioMixService?.GetPlaybackBufferedMilliseconds() ?? 0;
+            if (_bufferSampleCount == 0) _minPlaybackBufferMs = _lastPlaybackBufferMs;
+            else _minPlaybackBufferMs = Math.Min(_minPlaybackBufferMs, _lastPlaybackBufferMs);
+            _bufferSampleCount++;
+
+            // Track queue growth trend for overrun risk (input > drain)
+            int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+            int growth = queueCount - _lastQueueCount;
+            _queueGrowthAccum += growth;
+            _queueGrowthSamples++;
+            _lastQueueCount = queueCount;
+        }
+
+        private void UpdateCompactHealthText(int queueCount)
+        {
+            double ratio = _rateRatioSmoothed > 0 ? _rateRatioSmoothed : _lastRateRatio;
+            double bufMs = _minPlaybackBufferMs > 0 ? _minPlaybackBufferMs : _lastPlaybackBufferMs;
+            string rateTag = ratio <= 0 ? "Rate --" : $"Rate {(ratio * 100.0):0}%";
+            string bufTag = $"Buf {bufMs:0}ms";
+            string queueTag = $"Q {queueCount}";
+
+            string warn = string.Empty;
+            if (ratio > 1.08) warn = "OVR";
+            else if (ratio > 0 && ratio < 0.95) warn = "UND";
+            if (bufMs > 0 && bufMs < 15) warn = string.IsNullOrEmpty(warn) ? "LOW" : warn + "/LOW";
+
+            // queue growth trend (average positive growth over samples)
+            if (_queueGrowthSamples >= 4)
+            {
+                double avgGrowth = _queueGrowthAccum / (double)_queueGrowthSamples;
+                if (avgGrowth > 2 && queueCount > MaxPacketQueue * 0.6) warn = string.IsNullOrEmpty(warn) ? "QHI" : warn + "/QHI";
+                if (_queueGrowthSamples >= 20)
+                {
+                    _queueGrowthSamples = 0;
+                    _queueGrowthAccum = 0;
+                }
+            }
+
+            string compact = string.IsNullOrEmpty(warn)
+                ? $"{rateTag} | {bufTag} | {queueTag}"
+                : $"{rateTag} | {bufTag} | {queueTag} | {warn}";
+            try { QueueTextBlock.Text = compact; } catch { }
+
+            if (_bufferSampleCount >= 10)
+            {
+                _bufferSampleCount = 0;
+                _minPlaybackBufferMs = _lastPlaybackBufferMs;
+            }
         }
 
         private void RecordButton_Click(object sender, RoutedEventArgs e)

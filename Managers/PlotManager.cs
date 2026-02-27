@@ -14,7 +14,7 @@ namespace ADC_Rec.Managers
         private readonly int[] _count;
         private readonly object _lock = new object();
 
-        public PlotManager(int historySamplesPerChannel = 48000) // default 1s @ 48k
+        public PlotManager(int historySamplesPerChannel = 44100) // default 1s @ 44.1k
         {
             _capacity = Math.Max(1024, historySamplesPerChannel);
             _buffers = new float[Packet.NumChannels][];

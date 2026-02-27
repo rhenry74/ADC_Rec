@@ -10,7 +10,7 @@ namespace ADC_Rec.Services
     public class AudioMixService : IDisposable
     {
         private const int InputSampleRate = 44100;
-        private const int OutputSampleRate = 48000;
+        private const int OutputSampleRate = 44100;
         private const int OutputChannels = 2;
         private const int BitsPerSample = 24;
         private const int LedCount = 20;
@@ -101,6 +101,14 @@ namespace ADC_Rec.Services
         public float PeakHoldRight => _peakHoldRight;
         public float AvgHoldLeft => _avgHoldLeft;
         public float AvgHoldRight => _avgHoldRight;
+
+        public double GetPlaybackBufferedMilliseconds()
+        {
+            if (_playbackBuffer == null) return 0;
+            var format = _playbackBuffer.WaveFormat;
+            if (format == null || format.AverageBytesPerSecond <= 0) return 0;
+            return _playbackBuffer.BufferedBytes * 1000.0 / format.AverageBytesPerSecond;
+        }
 
         public void StartPlayback()
         {
