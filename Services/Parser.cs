@@ -9,6 +9,10 @@ namespace ADC_Rec.Services
         public event Action<Packet>? PacketParsed;
         public event Action<string>? DebugLine;
 
+        public long ParsedPacketCount => System.Threading.Interlocked.Read(ref _parsedPacketCount);
+        public long InvalidPacketCount => System.Threading.Interlocked.Read(ref _invalidPacketCount);
+        public long TrimmedBytesCount => System.Threading.Interlocked.Read(ref _trimmedBytesCount);
+
         // When verbose is false (default), parser will not emit ASCII debug lines to avoid flooding the host
         public bool Verbose { get; set; } = false;
 
@@ -16,6 +20,10 @@ namespace ADC_Rec.Services
         private const int HeaderSize = 2;
         private const int PayloadSize = 4 * 8 * 3; // NUM_CHANNELS * BUFFER_LEN * 3
         private const int PacketSize = HeaderSize + PayloadSize;
+
+        private long _parsedPacketCount = 0;
+        private long _invalidPacketCount = 0;
+        private long _trimmedBytesCount = 0;
 
         public void Feed(byte[] data)
         {
@@ -50,6 +58,7 @@ namespace ADC_Rec.Services
                     var pkt = ParsePayload(payload);
                     if (pkt != null)
                     {
+                        System.Threading.Interlocked.Increment(ref _parsedPacketCount);
                         PacketParsed?.Invoke(pkt);
                         _buf.RemoveRange(i, PacketSize);
                         i = 0; // restart
@@ -58,6 +67,7 @@ namespace ADC_Rec.Services
                     else
                     {
                         // malformed -> drop sentinel and continue
+                        System.Threading.Interlocked.Increment(ref _invalidPacketCount);
                         _buf.RemoveAt(i);
                         continue;
                     }
@@ -72,7 +82,9 @@ namespace ADC_Rec.Services
             const int MaxBuf = 64 * 1024;
             if (_buf.Count > MaxBuf)
             {
-                _buf.RemoveRange(0, _buf.Count - MaxBuf);
+                int trimmed = _buf.Count - MaxBuf;
+                _buf.RemoveRange(0, trimmed);
+                System.Threading.Interlocked.Add(ref _trimmedBytesCount, trimmed);
             }
         }
 

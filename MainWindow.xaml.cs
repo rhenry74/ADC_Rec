@@ -1,10 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Collections.Concurrent;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
-using System.Threading;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -12,8 +5,17 @@ using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices.WindowsRuntime;
+using System.Threading;
+using System.Threading.Tasks;
 using Windows.Foundation;
 using Windows.Foundation.Collections;
+using Microsoft.UI.Xaml.Shapes;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -28,7 +30,8 @@ namespace ADC_Rec
         private Services.SerialService _serialService;
         private Services.Parser _parser;
         private Managers.PlotManager _plotManager;
-        private bool _running = false;
+        private Services.AudioMixService _audioMixService;
+        private volatile bool _running = false;
 
         // Incoming packet queue and timer for batched UI updates
         private readonly System.Collections.Concurrent.ConcurrentQueue<Models.Packet> _packetQueue = new System.Collections.Concurrent.ConcurrentQueue<Models.Packet>();
@@ -36,10 +39,8 @@ namespace ADC_Rec
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
         private System.Threading.Timer? _uiTimer = null;
         private System.Threading.Timer? _counterTimer = null; // updates bytes-per-channel UI every 200ms
-        private double _cpuFreq = 240000000.0;
-        private double _rampSlope = 1.0;
-        private int _displayWindowSamples = 48000; // default 1s
-        private int _sampleRate = 48000; // default sample rate
+        private int _displayWindowSamples = 44100; // default 1s
+        private int _sampleRate = 44100; // default sample rate
         private int _plotBits = 16; // default plot bits (user-selectable)
         private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
         private const int MaxPacketBatchPerTick = 64;
@@ -47,10 +48,48 @@ namespace ADC_Rec
         private int _lastLogFlushTick = Environment.TickCount;
         private const int LogFlushMs = 500;
 
+        // Background drain and recording state
+        private System.Threading.CancellationTokenSource? _drainCts = null;
+        private System.Threading.Tasks.Task? _drainTask = null;
+        private readonly object _recordLock = new object();
+        private System.IO.BinaryWriter? _recordWriter = null;
+        private bool _recording = false;
+        private bool _replaying = false;
+        private long _droppedPacketCount = 0;
+        private long _dropLogAccumulator = 0;
+        private int _lastDropLogTick = Environment.TickCount;
+        private long _processedPacketCount = 0;
+        private long _drainLoopIterations = 0;
+        private int _lastDrainBatchCount = 0;
+        private int _lastDrainTick = 0;
+        private bool _drainStartedLogged = false;
+        private bool _drainIdleLogged = false;
+        private const int DrainBatchSize = 2048;
+        private const int DrainIdleMs = 1;
+        private const int DrainHighWaterMark = MaxPacketQueue;
+        private const int DrainTargetQueue = MaxPacketQueue / 2;
+
+        // Rate/health diagnostics (compact UI)
+        private long _lastRateTick = Environment.TickCount;
+        private long _lastRateBytesTotal = 0;
+        private double _lastRateRatio = 0;
+        private double _lastPlaybackBufferMs = 0;
+        private double _minPlaybackBufferMs = 0;
+        private long _lastRateParsedPkts = 0;
+        private double _rateRatioSmoothed = 0;
+        private int _lastQueueCount = 0;
+        private long _queueGrowthAccum = 0;
+        private int _queueGrowthSamples = 0;
+        private int _bufferSampleCount = 0;
+
         // Reusable display buffers to avoid allocations
         private float[][] _displayBuffers = new float[Models.Packet.NumChannels][];
         private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
         private long[] _bytesPerChannel = new long[Models.Packet.NumChannels]; // parsed bytes per channel (cumulative)
+        private uint[] _hoverRaw = new uint[1];
+        private readonly System.Collections.Generic.List<Rectangle> _meterLeftRects = new System.Collections.Generic.List<Rectangle>();
+        private readonly System.Collections.Generic.List<Rectangle> _meterRightRects = new System.Collections.Generic.List<Rectangle>();
+        private const int MeterLedCount = 20;
 
         public MainWindow()
         {
@@ -64,13 +103,10 @@ namespace ADC_Rec
             _parser.PacketParsed += Parser_PacketParsed;
             _parser.DebugLine += (s) => { if (_parser.Verbose) AddLog("[DBG] " + s); };
 
-            _plotManager = new Managers.PlotManager(48000); // 1 s history default
+            _plotManager = new Managers.PlotManager(44100); // 1 s history default
+            _audioMixService = new Services.AudioMixService();
 
-            // initialize UI-driven conversion parameters
-            double.TryParse(CpuFreqTextBox.Text, out _cpuFreq);
-            double.TryParse(RampSlopeTextBox.Text, out _rampSlope);
-            CpuFreqTextBox.TextChanged += (s, e) => { double.TryParse(CpuFreqTextBox.Text, out _cpuFreq); };
-            RampSlopeTextBox.TextChanged += (s, e) => { double.TryParse(RampSlopeTextBox.Text, out _rampSlope); };
+            InitializeMeters();
 
             // prepare display buffers
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _displayBuffers[ch] = new float[_displayWindowSamples];
@@ -79,13 +115,8 @@ namespace ADC_Rec
             // initialize counters and counter timer (stopped until capture starts)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _bytesPerChannel[ch] = 0;
             _counterTimer = new System.Threading.Timer(_ => UpdateBytesUi(), null, Timeout.Infinite, 200);
-            // Plot bits combo hookup (if exists)
-            if (PlotBitsCombo != null)
-            {
-                PlotBitsCombo.SelectionChanged += PlotBitsCombo_SelectionChanged;
-                // ensure default selection reflects _plotBits
-                _ = DispatcherQueue.TryEnqueue(() => { foreach (var it in PlotBitsCombo.Items) if (it is ComboBoxItem c && c.Content?.ToString() == _plotBits.ToString()) PlotBitsCombo.SelectedItem = it; });
-            }
+            // Plot bits NumberBox initialized below (spinner control)
+            if (PlotBitsNumberBox != null) PlotBitsNumberBox.Value = _plotBits;
 
             // Fit-to-data checkbox hookup (if exists)
             if (FitToDataCheck != null)
@@ -95,12 +126,26 @@ namespace ADC_Rec
                 FitToDataCheck.Unchecked += (s, e) => { _fitToData = false; _logQueue.Enqueue("Fit to data: OFF"); };
             }
 
+            if (DcBlockCheck != null)
+            {
+                DcBlockCheck.IsChecked = true;
+                DcBlockCheck.Checked += (s, e) => { _audioMixService?.SetDcBlockEnabled(true); _logQueue.Enqueue("DC block: ON"); };
+                DcBlockCheck.Unchecked += (s, e) => { _audioMixService?.SetDcBlockEnabled(false); _logQueue.Enqueue("DC block: OFF"); };
+            }
+
             // Verbose checkbox hookup (if exists)
             if (VerboseCheckbox != null)
             {
                 VerboseCheckbox.IsChecked = false;
                 VerboseCheckbox.Checked += (s, e) => { _parser.Verbose = true; _logQueue.Enqueue("Verbose ON"); };
                 VerboseCheckbox.Unchecked += (s, e) => { _parser.Verbose = false; _logQueue.Enqueue("Verbose OFF"); };
+            }
+
+            // PlotBits numberbox and ReverseBytes checkbox hookup (if exists)
+            if (PlotBitsNumberBox != null)
+            {
+                PlotBitsNumberBox.Value = _plotBits;
+                // ValueChanged is wired in XAML; additional hookup not required here.
             }
 
             // Show hover/last-value labels all the time (initialize)
@@ -117,6 +162,60 @@ namespace ADC_Rec
             this.Closed += MainWindow_Closed;
         }
 
+        private void InitializeMeters()
+        {
+            if (MeterLeftPanel == null || MeterRightPanel == null) return;
+            MeterLeftPanel.Children.Clear();
+            MeterRightPanel.Children.Clear();
+            _meterLeftRects.Clear();
+            _meterRightRects.Clear();
+
+            for (int i = 0; i < MeterLedCount; i++)
+            {
+                var leftRect = CreateMeterRect(i);
+                var rightRect = CreateMeterRect(i);
+                MeterLeftPanel.Children.Insert(0, leftRect);
+                MeterRightPanel.Children.Insert(0, rightRect);
+                _meterLeftRects.Add(leftRect);
+                _meterRightRects.Add(rightRect);
+            }
+        }
+
+        private Rectangle CreateMeterRect(int index)
+        {
+            var rect = new Rectangle
+            {
+                Width = 24,
+                Height = 8,
+                Fill = new SolidColorBrush(Microsoft.UI.Colors.DarkGreen),
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            return rect;
+        }
+
+        private void ForceRedraw()
+        {
+            _ = DispatcherQueue.TryEnqueue(() => {
+                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
+                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
+                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
+                        : 1f;
+                    var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
+                }
+            });
+        }
+
+        private int ConvertRawToUnsigned(uint raw)
+        {
+            return (int)(raw & 0x00FFFFFFu);
+        }
+
         private void MainWindow_Activated(object sender, Microsoft.UI.Xaml.WindowActivatedEventArgs e)
         {
             // Activated may be called multiple times; refresh ports when activated initially
@@ -126,6 +225,7 @@ namespace ADC_Rec
         private void MainWindow_Closed(object sender, Microsoft.UI.Xaml.WindowEventArgs args)
         {
             _serialService?.Dispose();
+            _audioMixService?.Dispose();
             try { _counterTimer?.Change(Timeout.Infinite, Timeout.Infinite); _counterTimer?.Dispose(); _counterTimer = null; } catch { }
         }
 
@@ -160,7 +260,7 @@ namespace ADC_Rec
 
         private void Parser_PacketParsed(Models.Packet pkt)
         {
-            // Enqueue packets quickly for batch processing on UI timer
+            // Enqueue packets quickly for batch processing by background drain
             _packetQueue.Enqueue(pkt);
             System.Threading.Interlocked.Increment(ref _pendingPacketCount);
 
@@ -169,102 +269,66 @@ namespace ADC_Rec
             {
                 System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 3);
             }
-        }
 
-        private void ProcessPendingPackets()
-        {
-            if (System.Threading.Interlocked.Add(ref _pendingPacketCount, 0) == 0) return;
-
-            // read conversion parameters on UI thread (safely)
-            _ = DispatcherQueue.TryEnqueue(() =>
-            {
-                double.TryParse(CpuFreqTextBox.Text, out _cpuFreq);
-                double.TryParse(RampSlopeTextBox.Text, out _rampSlope);
-            });
-
-            float voltsPerCycle = (float)(_rampSlope / Math.Max(1.0, _cpuFreq));
-
-            // Drop oldest if queue is massive
+            // Enforce bounded queue immediately to avoid unbounded memory growth when parsing is faster than drain
             try
             {
                 int qCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
                 if (qCount > MaxPacketQueue)
                 {
                     int toDrop = qCount - MaxPacketQueue;
+                    int dropped = 0;
                     for (int i = 0; i < toDrop; i++)
                     {
-                        if (_packetQueue.TryDequeue(out _)) System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                        if (_packetQueue.TryDequeue(out _))
+                        {
+                            System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                            dropped++;
+                        }
                         else break;
                     }
-                    _logQueue.Enqueue($"Packet queue full, dropped {toDrop} packets");
-                }
-            }
-            catch { }
-
-            var batch = new List<Models.Packet>(MaxPacketBatchPerTick);
-            for (int i = 0; i < MaxPacketBatchPerTick; i++)
-            {
-                if (_packetQueue.TryDequeue(out var p))
-                {
-                    batch.Add(p);
-                    System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
-                }
-                else break;
-            }
-            if (batch.Count == 0)
-            {
-                if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
-                return;
-            }
-
-            _plotManager.AddPacketsBatch(batch, voltsPerCycle, _plotBits);
-
-            // Verbose diagnostics only when enabled: compute min/max and enqueue as logs
-            if (_parser.Verbose)
-            {
-                double[] chMin = new double[Models.Packet.NumChannels];
-                double[] chMax = new double[Models.Packet.NumChannels];
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++) { chMin[ch] = double.MaxValue; chMax[ch] = double.MinValue; }
-                foreach (var pkt in batch)
-                {
-                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    if (dropped > 0)
                     {
-                        for (int i = 0; i < Models.Packet.BufferLen; i++)
+                        System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
+                        System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
+                        int now = Environment.TickCount;
+                        if (now - _lastDropLogTick >= 10_000)
                         {
-                            // compute scaled integer for stats using the selected plot bits
-                            double raw24 = pkt.Samples[ch, i] & 0x00FFFFFFu;
-                            int shift = Math.Max(0, 24 - Math.Max(1, Math.Min(24, _plotBits)));
-                            double scaled = Math.Floor(raw24 / Math.Pow(2, shift));
-                            double v = scaled; // plotted as integer units
-                            if (v < chMin[ch]) chMin[ch] = v;
-                            if (v > chMax[ch]) chMax[ch] = v;
+                            long pendingDrops = System.Threading.Interlocked.Exchange(ref _dropLogAccumulator, 0);
+                            _lastDropLogTick = now;
+                            if (pendingDrops > 0)
+                            {
+                                _logQueue.Enqueue($"Packet queue full, dropped {pendingDrops} packets (last 10s)");
+                            }
                         }
                     }
                 }
-
-                string stats = "Batch stats:";
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++) stats += $" ch{ch} min={chMin[ch]:G6} max={chMax[ch]:G6};";
-                _logQueue.Enqueue(stats);
-
-                var p0 = batch[0];
-                string snap = "First pkt samples:";
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
-                {
-                    snap += $" ch{ch}=";
-                    for (int i = 0; i < Models.Packet.BufferLen; i++) snap += $"{p0.Samples[ch, i]} ";
-                }
-                _logQueue.Enqueue(snap);
             }
+            catch { }
+        }
+
+        private void ProcessPendingPackets()
+        {
+            // UI refresh only; background drain feeds the plot manager at full speed
+            if (!_running && !_replaying) return;
+
+
 
             // trigger single UI update (fill display buffers then draw) and flush logs occasionally
             _ = DispatcherQueue.TryEnqueue(() =>
             {
                 bool anyDrawn = false;
+                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
+                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
+                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
+                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
+                        : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n);
+                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
                     if (n > 0) anyDrawn = true;
                 }
 
@@ -273,7 +337,7 @@ namespace ADC_Rec
                 {
                     var tmpRaw = new uint[1];
                     int a = _plotManager.FillChannelRawSnapshot(ch, tmpRaw, 1);
-                    string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({(tmpRaw[0] >> Math.Max(0, 24 - _plotBits))})" : "<no data>";
+                    string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({ConvertRawToUnsigned(tmpRaw[0])})" : "<no data>";
                     if (ch == 0) HoverText0.Text = txt;
                     else if (ch == 1) HoverText1.Text = txt;
                     else if (ch == 2) HoverText2.Text = txt;
@@ -282,14 +346,44 @@ namespace ADC_Rec
 
                 if (!anyDrawn)
                 {
-                    var sbCounts = new System.Text.StringBuilder();
-                    sbCounts.Append("Plot counts:");
-                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++) sbCounts.Append($" ch{ch}={_plotManager.GetAvailableSamples(ch)}");
-                    _logQueue.Enqueue(sbCounts.ToString());
+                    // Avoid spamming logs. Update on-screen diagnostics so you can inspect counts without flooding the log.
+                    UpdateBytesUi();
                 }
+
+                UpdateMeterUi();
 
                 if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
             });
+        }
+
+        private void UpdateMeterUi()
+        {
+            if (_audioMixService == null || _meterLeftRects.Count == 0 || _meterRightRects.Count == 0) return;
+            var left = _audioMixService.GetMeterLedsLeft();
+            var right = _audioMixService.GetMeterLedsRight();
+            for (int i = 0; i < MeterLedCount; i++)
+            {
+                UpdateMeterRect(_meterLeftRects[i], left[i], i);
+                UpdateMeterRect(_meterRightRects[i], right[i], i);
+            }
+
+            if (PeakHoldLeftBar != null) PeakHoldLeftBar.Value = _audioMixService.PeakHoldLeft;
+            if (PeakHoldRightBar != null) PeakHoldRightBar.Value = _audioMixService.PeakHoldRight;
+            if (AvgHoldLeftBar != null) AvgHoldLeftBar.Value = _audioMixService.AvgHoldLeft;
+            if (AvgHoldRightBar != null) AvgHoldRightBar.Value = _audioMixService.AvgHoldRight;
+        }
+
+        private void UpdateMeterRect(Rectangle rect, float lit, int index)
+        {
+            if (rect == null) return;
+            int thresholdRed = (int)Math.Ceiling(MeterLedCount * 0.9);
+            int thresholdYellow = (int)Math.Ceiling(MeterLedCount * 0.6);
+            var color = index >= thresholdRed
+                ? Microsoft.UI.Colors.Red
+                : index >= thresholdYellow
+                    ? Microsoft.UI.Colors.Yellow
+                    : Microsoft.UI.Colors.LimeGreen;
+            rect.Fill = new SolidColorBrush(lit > 0.5f ? color : Microsoft.UI.Colors.Black);
         }
 
         private void FlushLogsAndUpdateQueueStatus()
@@ -323,7 +417,12 @@ namespace ADC_Rec
             }
 
             // update queue count display
-            try { QueueTextBlock.Text = $"Queue: {System.Threading.Interlocked.Add(ref _pendingPacketCount, 0)}"; } catch { }
+            try
+            {
+                int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+                UpdateCompactHealthText(queueCount);
+            }
+            catch { }
 
             _lastLogFlushTick = now;
         }
@@ -353,34 +452,18 @@ namespace ADC_Rec
             catch { }
         }
 
+        // Combo-based PlotBits handler left for backward compatibility if control returns; no-op when control missing.
         private void PlotBitsCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            try
-            {
-                if (PlotBitsCombo.SelectedItem is ComboBoxItem item && int.TryParse(item.Content?.ToString(), out int bits))
-                {
-                    _plotBits = Math.Max(1, Math.Min(24, bits));
-                    _logQueue.Enqueue($"Plot bits set to {_plotBits}");
-                    // Rescale historical buffers so old data reflects the new bit interpretation
-                    _plotManager.RescaleBuffers(_plotBits);
-                    // Force an immediate display refresh so change is visible right away
-                    _ = DispatcherQueue.TryEnqueue(() => {
-                        for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
-                        {
-                            int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                            var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                            DrawChannel(canvas, _displayBuffers[ch], n);
-                        }
-                    });
-                }
-            }
-            catch { }
+            // no-op: we now use the single PlotBitsNumberBox for full control.
         }
+
+        // Old PlotBitsTextBox LostFocus handler removed; using NumberBox.ValueChanged instead.
 
         private void StartUiTimer()
         {
             if (_uiTimer != null) return; // already running
-            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 33); // ~30Hz
+            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 50); // ~20Hz to reduce UI load
         }
 
         private void StopUiTimer()
@@ -391,7 +474,182 @@ namespace ADC_Rec
             _uiTimer = null;
         }
 
-        private void DrawChannel(Canvas canvas, float[] samples, int length)
+        private void StartBackgroundDrain()
+        {
+            // Log previous task state (if any)
+            if (_drainTask != null)
+            {
+                _logQueue.Enqueue($"Previous drain task state: {_drainTask.Status}");
+
+                if (!_drainTask.IsCompleted)
+                {
+                    _logQueue.Enqueue("Drain loop already running");
+                    return;
+                }
+
+                if (_drainTask.IsFaulted)
+                {
+                    _logQueue.Enqueue($"Previous drain faulted: {_drainTask.Exception}");
+                }
+            }
+
+            // Fresh CTS for this run
+            _drainCts = new CancellationTokenSource();
+
+            // Start on a dedicated background thread (WinUI-safe)
+            _drainTask = Task.Factory.StartNew(
+                async () =>
+                {
+                    try
+                    {
+                        _logQueue.Enqueue("DrainLoop delegate entered");
+                        await DrainLoop(_drainCts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logQueue.Enqueue("DrainLoop canceled");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logQueue.Enqueue($"DrainLoop crashed: {ex}");
+                        throw;
+                    }
+                },
+                _drainCts.Token,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default
+            ).Unwrap();
+
+            _logQueue.Enqueue("Background drain started");
+        }
+
+        private async System.Threading.Tasks.Task DrainLoop(System.Threading.CancellationToken token)
+        {
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    if (!_drainStartedLogged)
+                    {
+                        _drainStartedLogged = true;
+                        _logQueue.Enqueue("Drain loop started");
+                    }
+                    if (!_running && !_replaying)
+                    {
+                        if (!_drainIdleLogged)
+                        {
+                            _drainIdleLogged = true;
+                            _logQueue.Enqueue("Drain loop idle (capture not running)");
+                        }
+                        await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
+                        continue;
+                    }
+                    _drainIdleLogged = false;
+                    System.Threading.Interlocked.Increment(ref _drainLoopIterations);
+                    int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+                    if (!_recording && queueCount >= DrainHighWaterMark)
+                    {
+                        int toDrop = Math.Max(0, queueCount - DrainTargetQueue);
+                        int dropped = 0;
+                        for (int i = 0; i < toDrop; i++)
+                        {
+                            if (_packetQueue.TryDequeue(out _))
+                            {
+                                System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                                dropped++;
+                            }
+                            else break;
+                        }
+                        if (dropped > 0)
+                        {
+                            System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
+                            System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
+                        }
+                    }
+                    var batch = new List<Models.Packet>(DrainBatchSize);
+                    for (int i = 0; i < DrainBatchSize; i++)
+                    {
+                        if (_packetQueue.TryDequeue(out var p))
+                        {
+                            batch.Add(p);
+                            System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                        }
+                        else break;
+                    }
+                    _lastDrainBatchCount = batch.Count;
+                    _lastDrainTick = Environment.TickCount;
+                    if (batch.Count == 0)
+                    {
+                        await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
+                        continue;
+                    }
+                    _plotManager.AddPacketsBatch(batch, 0f, _plotBits);
+                    _audioMixService?.ProcessPackets(batch);
+                    // Track processed packets for diagnostics
+                    System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
+
+                    // If recording, write raw packets to disk (header + payload)
+                    if (_recording)
+                    {
+                        lock (_recordLock)
+                        {
+                            if (_recordWriter != null)
+                            {
+                                foreach (var pkt in batch)
+                                {
+                                    try
+                                    {
+                                        _recordWriter.Write((byte)0x55);
+                                        _recordWriter.Write((byte)0xAA);
+                                        for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                                        {
+                                            for (int i = 0; i < Models.Packet.BufferLen; i++)
+                                            {
+                                                uint v = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                                                byte b0 = (byte)(v & 0xFF);
+                                                byte b1 = (byte)((v >> 8) & 0xFF);
+                                                byte b2 = (byte)((v >> 16) & 0xFF);
+                                                _recordWriter.Write(b0);
+                                                _recordWriter.Write(b1);
+                                                _recordWriter.Write(b2);
+                                            }
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logQueue.Enqueue("Record write error: " + ex.Message);
+                                    }
+                                }
+                                try { _recordWriter.Flush(); } catch { }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                _logQueue.Enqueue("Drain error: " + ex.Message);
+            }
+            _logQueue.Enqueue("Background drain stopped");
+        }
+
+        private void StopBackgroundDrain()
+        {
+            try
+            {
+                if (_drainCts != null)
+                {
+                    _drainCts.Cancel();
+                    _drainCts.Dispose();
+                    _drainCts = null;
+                }
+                _drainTask = null;
+            }
+            catch { }
+        }
+
+        private void DrawChannel(Canvas canvas, float[] samples, int length, float scale)
         {
             try
             {
@@ -404,25 +662,33 @@ namespace ADC_Rec
                 if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
 
                 float min, max;
+                float mid = 0f;
+                int bits = Math.Max(1, Math.Min(24, _plotBits));
+                int maxValue = (1 << bits) - 1;
                 if (_fitToData)
                 {
-                    // autoscale to snapshot data range (no symmetric offset)
+                    // Autoscale to snapshot data range using unsigned values, then center around midpoint (AC-coupled)
                     min = float.MaxValue; max = float.MinValue;
                     for (int i = 0; i < length; i++)
                     {
-                        float v = samples[i];
+                        uint raw = (uint)samples[i] & 0x00FFFFFFu;
+                        int vUnsigned = ConvertRawToUnsigned(raw);
+                        float v = (float)vUnsigned * scale;
                         if (v < min) min = v;
                         if (v > max) max = v;
                     }
-                    if (min == float.MaxValue || max == float.MinValue) { min = 0f; max = 1f; }
-                    // add a tiny padding so flat lines are visible
+                    if (min == float.MaxValue || max == float.MinValue) { min = 0f; max = maxValue; }
                     if (Math.Abs(max - min) < 1e-6f) { max = min + 1f; }
+                    mid = (min + max) / 2f;
+                    float maxAbs = Math.Max(Math.Abs(max - mid), Math.Abs(min - mid));
+                    min = -maxAbs;
+                    max = maxAbs;
                 }
                 else
                 {
-                    // Use a fixed plotting range based on selected bit depth: [0 .. (2^bits - 1)]
+                    // Use a fixed plotting range based on selected bit depth: [0 .. 2^bits-1]
                     min = 0f;
-                    max = (float)(((1u << Math.Max(1, Math.Min(24, _plotBits))) - 1));
+                    max = maxValue;
                 }
                 float range = max - min;
                 if (range <= 0f) range = 1f; // fall back to sensible range to avoid div0
@@ -449,14 +715,18 @@ namespace ADC_Rec
                     float bmin = float.MaxValue, bmax = float.MinValue;
                     for (int k = s; k <= e && k < n; k++)
                     {
-                        float v = samples[k];
+                        // Convert raw sample to unsigned plotted value respecting plot bits and byte order
+                        uint raw = (uint)samples[k] & 0x00FFFFFFu;
+                        int vUnsigned = ConvertRawToUnsigned(raw);
+                        float v = (float)vUnsigned * scale;
+                        if (_fitToData) v -= mid;
                         if (v < bmin) bmin = v;
                         if (v > bmax) bmax = v;
                     }
+                    if (bmin == float.MaxValue || bmax == float.MinValue) { bmin = min; bmax = min; }
                     double x = (double)b / (buckets - 1) * w;
                     double y1 = h - ((bmin - min) / range) * h;
                     double y2 = h - ((bmax - min) / range) * h;
-                    // push min then max to show envelope
                     pts.Add(new Windows.Foundation.Point(x, y1));
                     pts.Add(new Windows.Foundation.Point(x, y2));
                 }
@@ -484,7 +754,11 @@ namespace ADC_Rec
                 // Draw a small red dot at the most recent sample (helps detect scrolling)
                 if (length > 0)
                 {
-                    float last = samples[length - 1];
+                    // Convert last sample to signed plotted value
+                    uint rawLast = (uint)samples[length - 1] & 0x00FFFFFFu;
+                    int vLast = ConvertRawToUnsigned(rawLast);
+                    float last = (float)vLast * scale;
+                    if (_fitToData) last -= mid;
                     double xLast = w; // most recent sample drawn at right edge
                     double yLast = h - ((last - min) / range) * h;
                     var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
@@ -583,19 +857,291 @@ namespace ADC_Rec
             }
         }
 
+        private void CopyDiagButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string txt = string.Empty;
+                if (DiagTextBlock != null) txt = DiagTextBlock.Text ?? string.Empty;
+                // Include basic hover/latest labels and counts too
+                txt += "\r\n" + (HoverText0?.Text ?? "");
+                txt += "\r\n" + (HoverText1?.Text ?? "");
+                txt += "\r\n" + (HoverText2?.Text ?? "");
+                txt += "\r\n" + (HoverText3?.Text ?? "");
+                var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                dp.SetText(txt);
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
+                AddLog("Diagnostics copied to clipboard");
+            }
+            catch (Exception ex)
+            {
+                AddLog("Copy diag error: " + ex.Message);
+            }
+        }
+
+        private void PlotBitsNumberBox_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.NumberBoxValueChangedEventArgs e)
+        {
+            try
+            {
+                int bits = (int)Math.Round(e.NewValue);
+                bits = Math.Max(8, Math.Min(24, bits));
+                if (bits == _plotBits) return;
+                _plotBits = bits;
+                _logQueue.Enqueue($"Plot bits set to {_plotBits} (spinner)");
+                // If Fit-to-data is enabled, autoscale will hide the effect of changing bit depth. Disable it so the change is visible.
+                try
+                {
+                    if (FitToDataCheck != null && FitToDataCheck.IsChecked == true)
+                    {
+                        FitToDataCheck.IsChecked = false;
+                        _fitToData = false;
+                        _logQueue.Enqueue("Fit to data: OFF (disabled to apply plot bits)");
+                    }
+                }
+                catch { }
+                ForceRedraw();
+            }
+            catch (Exception ex) { _logQueue.Enqueue("PlotBits number change error: " + ex.Message); }
+        }
+
+        private void GainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        {
+            if (_audioMixService == null) return;
+            var slider = sender as Slider;
+            if (slider == null) return;
+            float gain = (float)slider.Value;
+            if (slider == GainSlider0) { _audioMixService.SetChannelGain(0, gain); GainText0.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider1) { _audioMixService.SetChannelGain(1, gain); GainText1.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider2) { _audioMixService.SetChannelGain(2, gain); GainText2.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider3) { _audioMixService.SetChannelGain(3, gain); GainText3.Text = $"{gain:0.00}x"; }
+        }
+
+        private void InputBits_ValueChanged(object sender, NumberBoxValueChangedEventArgs e)
+        {
+            if (_audioMixService == null) return;
+            var box = sender as NumberBox;
+            if (box == null) return;
+            int bits = (int)Math.Round(box.Value);
+            bits = Math.Max(8, Math.Min(24, bits));
+            if (box == InputBits0) _audioMixService.SetChannelInputBits(0, bits);
+            else if (box == InputBits1) _audioMixService.SetChannelInputBits(1, bits);
+            else if (box == InputBits2) _audioMixService.SetChannelInputBits(2, bits);
+            else if (box == InputBits3) _audioMixService.SetChannelInputBits(3, bits);
+        }
+
+        private void PanSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        {
+            if (_audioMixService == null) return;
+            var slider = sender as Slider;
+            if (slider == null) return;
+            float pan = (float)slider.Value;
+            string panText = pan < -0.05f ? $"{Math.Abs(pan):0.00} L" : pan > 0.05f ? $"{pan:0.00} R" : "Center";
+            if (slider == PanSlider0) { _audioMixService.SetChannelPan(0, pan); PanText0.Text = panText; }
+            else if (slider == PanSlider1) { _audioMixService.SetChannelPan(1, pan); PanText1.Text = panText; }
+            else if (slider == PanSlider2) { _audioMixService.SetChannelPan(2, pan); PanText2.Text = panText; }
+            else if (slider == PanSlider3) { _audioMixService.SetChannelPan(3, pan); PanText3.Text = panText; }
+        }
+
         private void UpdateBytesUi()
         {
             try
             {
+                long parsedPkts = _parser?.ParsedPacketCount ?? 0;
+                long invalidPkts = _parser?.InvalidPacketCount ?? 0;
+                long trimmedBytes = _parser?.TrimmedBytesCount ?? 0;
+                long drainIters = System.Threading.Interlocked.Read(ref _drainLoopIterations);
+                int lastBatch = System.Threading.Interlocked.CompareExchange(ref _lastDrainBatchCount, 0, 0);
+                int lastTick = System.Threading.Interlocked.CompareExchange(ref _lastDrainTick, 0, 0);
+                int ageMs = lastTick == 0 ? -1 : unchecked(Environment.TickCount - lastTick);
                 var sb = new System.Text.StringBuilder();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     long v = System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], 0);
                     sb.Append($" ch{ch}={v}");
                 }
-                _ = DispatcherQueue.TryEnqueue(() => { BytesTextBlock.Text = "Bytes:" + sb.ToString(); });
+                UpdateRateHealth(parsedPkts);
+                long dropped = System.Threading.Interlocked.Add(ref _droppedPacketCount, 0);
+                long processed = System.Threading.Interlocked.Add(ref _processedPacketCount, 0);
+                int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+                // collect per-channel snapshot counts and maximums for diagnostics
+                var sbDiag = new System.Text.StringBuilder();
+                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                {
+                    int avail = _plotManager.GetAvailableSamples(ch);
+                    uint maxRaw = _plotManager.GetMaxRaw(ch);
+                    sbDiag.Append($"ch{ch}: samples={avail} max=0x{maxRaw:X6}  ");
+                }
+                string drainInfo = ageMs < 0 ? "drainAge=NA" : $"drainAgeMs={ageMs}";
+                string diag = $"proc={processed} parsed={parsedPkts} invalid={invalidPkts} dropped={dropped} queue={queueCount} trimmedBytes={trimmedBytes} drainIters={drainIters} lastBatch={lastBatch} {drainInfo} {sbDiag.ToString()}";
+                _ = DispatcherQueue.TryEnqueue(() =>
+                {
+                    BytesTextBlock.Text = "Bytes:" + sb.ToString();
+                    QueueTextBlock.Text = $"Queue: {System.Threading.Interlocked.Add(ref _pendingPacketCount, 0)}";
+                    DroppedTextBlock.Text = $"Dropped: {dropped}";
+                    DiagTextBlock.Text = diag;
+                    UpdateCompactHealthText(queueCount);
+                });
             }
             catch { }
+        }
+
+        private void UpdateRateHealth(long parsedPkts)
+        {
+            int now = Environment.TickCount;
+            int elapsedMs = unchecked(now - (int)_lastRateTick);
+            if (elapsedMs < 500) return;
+
+            long pktDelta = parsedPkts - _lastRateParsedPkts;
+            double actualPacketsPerSec = elapsedMs > 0 ? pktDelta * 1000.0 / elapsedMs : 0;
+            double expectedPacketsPerSec = Math.Max(1.0, _sampleRate / (double)Models.Packet.BufferLen);
+            _lastRateRatio = expectedPacketsPerSec > 0 ? actualPacketsPerSec / expectedPacketsPerSec : 0;
+            _lastRateParsedPkts = parsedPkts;
+            _lastRateTick = now;
+
+            if (_rateRatioSmoothed <= 0) _rateRatioSmoothed = _lastRateRatio;
+            else _rateRatioSmoothed = (_rateRatioSmoothed * 0.8) + (_lastRateRatio * 0.2);
+
+            _lastPlaybackBufferMs = _audioMixService?.GetPlaybackBufferedMilliseconds() ?? 0;
+            if (_bufferSampleCount == 0) _minPlaybackBufferMs = _lastPlaybackBufferMs;
+            else _minPlaybackBufferMs = Math.Min(_minPlaybackBufferMs, _lastPlaybackBufferMs);
+            _bufferSampleCount++;
+
+            // Track queue growth trend for overrun risk (input > drain)
+            int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
+            int growth = queueCount - _lastQueueCount;
+            _queueGrowthAccum += growth;
+            _queueGrowthSamples++;
+            _lastQueueCount = queueCount;
+        }
+
+        private void UpdateCompactHealthText(int queueCount)
+        {
+            double ratio = _rateRatioSmoothed > 0 ? _rateRatioSmoothed : _lastRateRatio;
+            double bufMs = _minPlaybackBufferMs > 0 ? _minPlaybackBufferMs : _lastPlaybackBufferMs;
+            string rateTag = ratio <= 0 ? "Rate --" : $"Rate {(ratio * 100.0):0}%";
+            string bufTag = $"Buf {bufMs:0}ms";
+            string queueTag = $"Q {queueCount}";
+
+            string warn = string.Empty;
+            if (ratio > 1.08) warn = "OVR";
+            else if (ratio > 0 && ratio < 0.95) warn = "UND";
+            if (bufMs > 0 && bufMs < 15) warn = string.IsNullOrEmpty(warn) ? "LOW" : warn + "/LOW";
+
+            // queue growth trend (average positive growth over samples)
+            if (_queueGrowthSamples >= 4)
+            {
+                double avgGrowth = _queueGrowthAccum / (double)_queueGrowthSamples;
+                if (avgGrowth > 2 && queueCount > MaxPacketQueue * 0.6) warn = string.IsNullOrEmpty(warn) ? "QHI" : warn + "/QHI";
+                if (_queueGrowthSamples >= 20)
+                {
+                    _queueGrowthSamples = 0;
+                    _queueGrowthAccum = 0;
+                }
+            }
+
+            string compact = string.IsNullOrEmpty(warn)
+                ? $"{rateTag} | {bufTag} | {queueTag}"
+                : $"{rateTag} | {bufTag} | {queueTag} | {warn}";
+            try { QueueTextBlock.Text = compact; } catch { }
+
+            if (_bufferSampleCount >= 10)
+            {
+                _bufferSampleCount = 0;
+                _minPlaybackBufferMs = _lastPlaybackBufferMs;
+            }
+        }
+
+        private void RecordButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (!_recording)
+                {
+                    string folder = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                    string path = System.IO.Path.Combine(folder, $"ADCRec_{DateTime.Now:yyyyMMdd_HHmmss}.bin");
+                    var fs = new System.IO.FileStream(path, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.Read);
+                    lock (_recordLock) { _recordWriter = new System.IO.BinaryWriter(fs); }
+                    string wavPath = _audioMixService.StartWavWrite(folder);
+                    _recording = true;
+                    if (RecordButton != null) RecordButton.Content = "Stop Record";
+                    AddLog($"Recording raw: {path}");
+                    AddLog($"Recording mix WAV: {wavPath}");
+                }
+                else
+                {
+                    lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
+                    _recording = false;
+                    _audioMixService.StopWavWrite();
+                    if (RecordButton != null) RecordButton.Content = "Start Record";
+                    AddLog("Recording stopped");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog("Record error: " + ex.Message);
+            }
+        }
+
+        private void ReplayButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Find most recent recording in Documents and replay it into the parser (offline)
+            try
+            {
+                string folder = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                var files = System.IO.Directory.GetFiles(folder, "ADCRec_*.bin");
+                if (files == null || files.Length == 0) { AddLog("No recordings found in Documents"); return; }
+                var path = files.OrderByDescending(f => f).First();
+                AddLog($"Replaying {path}");
+                string wavPath = _audioMixService.StartWavWrite(folder);
+                AddLog($"Remix WAV: {wavPath}");
+                if (!_running)
+                {
+                    StartBackgroundDrain();
+                    StartUiTimer();
+                    StartCountersTimer();
+                    _audioMixService?.StartPlayback();
+                }
+                _replaying = true;
+                System.Threading.Tasks.Task.Run(async () =>
+                {
+                    try
+                    {
+                        int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
+                        using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
+                        var buf = new byte[pktLen];
+                        while (true)
+                        {
+                            int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
+                            if (read < pktLen) break;
+                            _parser.Feed(buf);
+                            // approximate real-time pacing based on sample rate and buffer length
+                            int pps = Math.Max(1, _sampleRate / Models.Packet.BufferLen);
+                            await System.Threading.Tasks.Task.Delay(1000 / pps).ConfigureAwait(false);
+                        }
+                        _logQueue.Enqueue($"Replay finished: {path}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logQueue.Enqueue("Replay error: " + ex.Message);
+                    }
+                    finally
+                    {
+                        _audioMixService.StopWavWrite();
+                        if (!_running)
+                        {
+                            StopBackgroundDrain();
+                            StopUiTimer();
+                            StopCountersTimer();
+                            _audioMixService?.StopPlayback();
+                        }
+                        _replaying = false;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                AddLog("Replay error: " + ex.Message);
+            }
         }
 
         private void ClearButton_Click(object sender, RoutedEventArgs e)
@@ -649,19 +1195,36 @@ namespace ADC_Rec
         private void StartButton_Click(object sender, RoutedEventArgs e)
         {
             _running = true;
+            System.Threading.Interlocked.Exchange(ref _drainLoopIterations, 0);
+            System.Threading.Interlocked.Exchange(ref _lastDrainBatchCount, 0);
+            System.Threading.Interlocked.Exchange(ref _lastDrainTick, 0);
+            _drainStartedLogged = false;
+            _drainIdleLogged = false;
+            StartBackgroundDrain();
             StartUiTimer();
             StartCountersTimer();
             AddLog("Capture started");
             StatusTextBlock.Text = "Running";
+            _audioMixService?.StartPlayback();
         }
 
         private void StopButton_Click(object sender, RoutedEventArgs e)
         {
             _running = false;
+            StopBackgroundDrain();
             StopUiTimer();
             StopCountersTimer();
+            // stop recording if active
+            if (_recording) {
+                lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
+                _recording = false;
+                _audioMixService.StopWavWrite();
+                if (RecordButton != null) RecordButton.Content = "Start Record";
+                AddLog("Recording stopped (capture stopped)");
+            }
             AddLog("Capture stopped");
             StatusTextBlock.Text = "Stopped";
+            _audioMixService?.StopPlayback();
         }
     }
 }
