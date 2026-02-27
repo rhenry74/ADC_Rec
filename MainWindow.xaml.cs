@@ -91,6 +91,31 @@ namespace ADC_Rec
         private readonly System.Collections.Generic.List<Rectangle> _meterRightRects = new System.Collections.Generic.List<Rectangle>();
         private const int MeterLedCount = 20;
 
+        // Cached brushes to avoid per-frame allocations
+        private readonly SolidColorBrush _brushLime = new SolidColorBrush(Microsoft.UI.Colors.Lime);
+        private readonly SolidColorBrush _brushRed = new SolidColorBrush(Microsoft.UI.Colors.Red);
+        private readonly SolidColorBrush _brushBlack = new SolidColorBrush(Microsoft.UI.Colors.Black);
+        private readonly SolidColorBrush _brushYellow = new SolidColorBrush(Microsoft.UI.Colors.Yellow);
+        private readonly SolidColorBrush _brushGreen = new SolidColorBrush(Microsoft.UI.Colors.Green);
+        private readonly SolidColorBrush _brushDimGray = new SolidColorBrush(Microsoft.UI.Colors.DimGray);
+
+        // Reusable drawing objects to avoid per-frame allocations
+        private readonly Polyline[] _channelPolylines = new Polyline[Models.Packet.NumChannels];
+        private readonly Line[] _channelBaselines = new Line[Models.Packet.NumChannels];
+        private readonly Ellipse[] _channelDots = new Ellipse[Models.Packet.NumChannels];
+        private readonly PointCollection[] _channelPoints = new PointCollection[Models.Packet.NumChannels];
+        
+        // Track if drawing objects have been initialized
+        private bool _drawingObjectsInitialized = false;
+        
+        // Track log text length to avoid rebuilding entire string
+        private int _logTextLength = 0;
+        private const int MaxLogChars = 200000;
+        private const int TrimLogChars = 50000; // Trim this many chars when limit reached
+
+        // UI enable/disable for maximum performance mode
+        private bool _uiEnabled = true;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -139,6 +164,14 @@ namespace ADC_Rec
                 VerboseCheckbox.IsChecked = false;
                 VerboseCheckbox.Checked += (s, e) => { _parser.Verbose = true; _logQueue.Enqueue("Verbose ON"); };
                 VerboseCheckbox.Unchecked += (s, e) => { _parser.Verbose = false; _logQueue.Enqueue("Verbose OFF"); };
+            }
+
+            // UI enabled checkbox hookup (if exists) - disables UI for max performance
+            if (UiEnabledCheck != null)
+            {
+                UiEnabledCheck.IsChecked = _uiEnabled;
+                UiEnabledCheck.Checked += (s, e) => { _uiEnabled = true; _logQueue.Enqueue("UI: ON"); };
+                UiEnabledCheck.Unchecked += (s, e) => { _uiEnabled = false; _logQueue.Enqueue("UI: OFF (max performance)"); };
             }
 
             // PlotBits numberbox and ReverseBytes checkbox hookup (if exists)
@@ -312,7 +345,8 @@ namespace ADC_Rec
             // UI refresh only; background drain feeds the plot manager at full speed
             if (!_running && !_replaying) return;
 
-
+            // If UI is disabled, skip all UI rendering but keep the timer running for drain to continue
+            if (!_uiEnabled) return;
 
             // trigger single UI update (fill display buffers then draw) and flush logs occasionally
             _ = DispatcherQueue.TryEnqueue(() =>
@@ -378,12 +412,19 @@ namespace ADC_Rec
             if (rect == null) return;
             int thresholdRed = (int)Math.Ceiling(MeterLedCount * 0.9);
             int thresholdYellow = (int)Math.Ceiling(MeterLedCount * 0.6);
-            var color = index >= thresholdRed
-                ? Microsoft.UI.Colors.Red
-                : index >= thresholdYellow
-                    ? Microsoft.UI.Colors.Yellow
-                    : Microsoft.UI.Colors.LimeGreen;
-            rect.Fill = new SolidColorBrush(lit > 0.5f ? color : Microsoft.UI.Colors.Black);
+            // Use cached brushes instead of creating new ones each frame
+            SolidColorBrush brushToUse;
+            if (lit > 0.5f)
+            {
+                if (index >= thresholdRed) brushToUse = _brushRed;
+                else if (index >= thresholdYellow) brushToUse = _brushYellow;
+                else brushToUse = _brushGreen;
+            }
+            else
+            {
+                brushToUse = _brushBlack;
+            }
+            rect.Fill = brushToUse;
         }
 
         private void FlushLogsAndUpdateQueueStatus()
@@ -407,13 +448,30 @@ namespace ADC_Rec
 
             if (flushed > 0)
             {
-                const int MaxChars = 200_000;
-                string add = sb.ToString();
-                string t = (LogTextBox.Text ?? string.Empty) + add;
-                if (t.Length > MaxChars) t = t.Substring(t.Length - MaxChars);
-                LogTextBox.Text = t;
-                LogTextBox.SelectionStart = t.Length;
-                LogTextBox.SelectionLength = 0;
+                // Efficiently append new text instead of rebuilding entire string
+                string newText = sb.ToString();
+                try
+                {
+                    // Use TextBox.AppendText which is more efficient than replacing .Text
+                    if (LogTextBox != null)
+                    {
+                        int currentLen = LogTextBox.Text?.Length ?? 0;
+                        // Only trim if we're over the limit
+                        if (currentLen + newText.Length > MaxLogChars)
+                        {
+                            // Keep only the last TrimLogChars characters from existing text
+                            int keepStart = Math.Max(0, currentLen - TrimLogChars);
+                            string trimmedText = (LogTextBox.Text ?? string.Empty).Substring(keepStart);
+                            LogTextBox.Text = trimmedText + newText;
+                        }
+                        else
+                        {
+                            LogTextBox.Text = (LogTextBox.Text ?? string.Empty) + newText;
+                        }
+                        LogTextBox.SelectionStart = LogTextBox.Text.Length;
+                    }
+                }
+                catch { }
             }
 
             // update queue count display
@@ -700,9 +758,10 @@ namespace ADC_Rec
                 int buckets = Math.Min(pixelWidth, n);
                 double bucketSize = (double)n / buckets;
 
+                // Use cached brush instead of creating new one each frame
                 var poly = new Microsoft.UI.Xaml.Shapes.Polyline
                 {
-                    Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Lime),
+                    Stroke = _brushLime,
                     StrokeThickness = 1
                 };
                 var pts = new Microsoft.UI.Xaml.Media.PointCollection();
@@ -737,13 +796,14 @@ namespace ADC_Rec
                 if (min <= 0 && max >= 0)
                 {
                     double y0 = h - ((0 - min) / range) * h;
+                    // Use cached brush
                     var baseline = new Microsoft.UI.Xaml.Shapes.Line
                     {
                         X1 = 0,
                         Y1 = y0,
                         X2 = w,
                         Y2 = y0,
-                        Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.DimGray),
+                        Stroke = _brushDimGray,
                         StrokeThickness = 1
                     };
                     canvas.Children.Add(baseline);
@@ -761,11 +821,12 @@ namespace ADC_Rec
                     if (_fitToData) last -= mid;
                     double xLast = w; // most recent sample drawn at right edge
                     double yLast = h - ((last - min) / range) * h;
+                    // Use cached brush
                     var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
                     {
                         Width = 4,
                         Height = 4,
-                        Fill = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Red)
+                        Fill = _brushRed
                     };
                     Canvas.SetLeft(dot, Math.Max(0, xLast - 2));
                     Canvas.SetTop(dot, Math.Max(0, yLast - 2));

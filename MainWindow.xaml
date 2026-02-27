@@ -69,6 +69,7 @@
                 <Button x:Name="RecordButton" Content="Start Record" Click="RecordButton_Click" />
                 <Button x:Name="ReplayButton" Content="Replay..." Click="ReplayButton_Click" />
             </StackPanel>
+            <CheckBox x:Name="UiEnabledCheck" Content="UI enabled" IsChecked="True" Margin="0,8,0,0" />
             <TextBox x:Name="LogTextBox" Height="220" Width="300" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" />
             <TextBlock x:Name="QueueTextBlock" Text="Queue: 0" Margin="0,6,0,0" />
             <TextBlock x:Name="DroppedTextBlock" Text="Dropped: 0" Margin="0,2,0,0" />
