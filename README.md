@@ -21,7 +21,7 @@ The app uses a multi-threaded architecture to process serial data through parsin
 | Function | Description |
 |----------|-------------|
 | `Parser.Feed()` | Appends bytes to internal buffer, searches for 0x55 0xAA header sentinel |
-| `Parser.ParsePayload()` | Parses 98-byte payload: 4 channels × 8 samples × 3 bytes (24-bit little-endian) |
+| `Parser.ParsePayload()` | Parses 98-byte payload: 4 channels × 8 samples × 3 bytes (16-bit little-endian) |
 | `Parser.PacketParsed` event | Fires with `Packet` object containing `uint[4,8] Samples` |
 | `MainWindow.Parser_PacketParsed()` | Enqueues packet to `_packetQueue`, increments `_pendingPacketCount` |
 
@@ -43,7 +43,7 @@ The app uses a multi-threaded architecture to process serial data through parsin
 | Function | Description |
 |----------|-------------|
 | `AudioMixService.ProcessPackets()` | Takes batch of packets, processes each sample: |
-| - `ConvertUnsignedToFloat()` | Converts 24-bit unsigned → float [-1, 1] |
+| - `ConvertUnsignedToFloat()` | Converts 16-bit unsigned → float [-1, 1] |
 | - Applies gain & pan per channel | Stereo mixing: 4ch → 2ch (L/R) |
 | - `ApplyDcBlock()` | DC offset removal (optional) |
 | - `StoreMonitorSample()` | Adds to output list |
