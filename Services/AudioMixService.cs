@@ -34,6 +34,8 @@ namespace ADC_Rec.Services
 
         private float _dcLeft;
         private float _dcRight;
+        private readonly float[] _dcChannelEstimates = new float[Packet.NumChannels];
+        
         private const float DcAlpha = 0.995f;
         private bool _dcBlockEnabled = true;
 
@@ -192,12 +194,24 @@ namespace ADC_Rec.Services
             {
                 for (int i = 0; i < Packet.BufferLen; i++)
                 {
-                    float mixL = 0f;
-                    float mixR = 0f;
+                    float[] processedSamples = new float[Packet.NumChannels];
                     for (int ch = 0; ch < Packet.NumChannels; ch++)
                     {
                         uint raw = pkt.Samples[ch, i];
                         float sample = ConvertUnsignedToFloat(raw, 16); // Fixed 16-bit
+                        
+                        if (dcEnabled)
+                        {
+                            sample = ApplyAdaptiveDcBlock(sample, ch);
+                        }
+                        processedSamples[ch] = sample;
+                    }
+
+                    float mixL = 0f;
+                    float mixR = 0f;
+                    for (int ch = 0; ch < Packet.NumChannels; ch++)
+                    {
+                        float sample = processedSamples[ch];
                         float gain = gains[ch];
                         float pan = pans[ch];
                         float angle = (pan + 1f) * 0.25f * (float)Math.PI;
@@ -206,11 +220,7 @@ namespace ADC_Rec.Services
                         mixL += sample * gain * leftGain;
                         mixR += sample * gain * rightGain;
                     }
-                    if (dcEnabled)
-                    {
-                        mixL = ApplyDcBlock(mixL, ref _dcLeft);
-                        mixR = ApplyDcBlock(mixR, ref _dcRight);
-                    }
+                    
                     StoreMonitorSample(mixL, mixR, outputSamples);
                 }
             }
@@ -279,14 +289,31 @@ namespace ADC_Rec.Services
             int frameSamples = 0;
             for (int i = 0; i < outputSamples.Count; i += 2)
             {
+                // VU meters should measure the amplitude (absolute value)
+                // If DC Block is OFF, raw samples are centered on DC bias.
+                // Convert to AC-only amplitude for the VU meter logic.
                 float l = Math.Abs(outputSamples[i]);
                 float r = Math.Abs(outputSamples[i + 1]);
+
+                // Adjust for DC offset if DC Block is OFF
+                if (!_dcBlockEnabled)
+                {
+                    // If DC block is OFF, the signal is on a DC bias.
+                    // A 16-bit signal (32767 peak) has a mid-point bias.
+                    // This means a full-scale signal (0 to 65535) centers on 32767.
+                    // When converted to [-1, 1], the center is 0.0.
+                    // The range is effectively doubled in terms of magnitude if DC isn't removed.
+                    l *= 0.5f;
+                    r *= 0.5f;
+                }
+
                 if (l > peakL) peakL = l;
                 if (r > peakR) peakR = r;
                 sumL += l;
                 sumR += r;
                 frameSamples++;
             }
+            
             UpdateLedArray(_meterLedsLeft, peakL);
             UpdateLedArray(_meterLedsRight, peakR);
 
@@ -343,11 +370,18 @@ namespace ADC_Rec.Services
             return v;
         }
 
-        private static float ApplyDcBlock(float sample, ref float state)
+        private float ApplyAdaptiveDcBlock(float sample, int channelIndex)
         {
-            float outSample = sample - state;
-            state = sample + outSample * DcAlpha;
-            return outSample;
+            // Always track the estimate to handle steady-state DC offsets.
+            // Using a slightly faster time constant allows tracking moving offsets,
+            // but is still slow enough not to affect audio frequencies.
+            const float tau = 0.5f; // 0.5 seconds
+            const float alpha = 1.0f / (tau * 44100.0f);
+
+            // Always update, no threshold-based freeze to allow steady-state DC removal
+            _dcChannelEstimates[channelIndex] += alpha * (sample - _dcChannelEstimates[channelIndex]);
+
+            return sample - _dcChannelEstimates[channelIndex];
         }
 
 
