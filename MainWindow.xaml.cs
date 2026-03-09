@@ -219,17 +219,11 @@ namespace ADC_Rec
         private void ForceRedraw()
         {
             _ = DispatcherQueue.TryEnqueue(() => {
-                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
-                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float scaleTo16 = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetScaleTo16BitCounts(bitsSnapshot[ch])
-                        : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo16);
+                    DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
                 }
             });
         }
@@ -342,17 +336,12 @@ namespace ADC_Rec
             _ = DispatcherQueue.TryEnqueue(() =>
             {
                 bool anyDrawn = false;
-                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
-                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float scaleTo16 = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetScaleTo16BitCounts(bitsSnapshot[ch])
-                        : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo16);
+                    // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
+                    DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
                     if (n > 0) anyDrawn = true;
                 }
 
@@ -626,15 +615,17 @@ namespace ADC_Rec
                     }
                     _lastDrainBatchCount = batch.Count;
                     _lastDrainTick = Environment.TickCount;
-                    if (batch.Count == 0)
-                    {
-                        await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
-                        continue;
-                    }
-                    _plotManager.AddPacketsBatch(batch, 0f, 16);
-                    _audioMixService?.ProcessPackets(batch);
-                    // Track processed packets for diagnostics
-                    System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
+            if (batch.Count == 0)
+            {
+                await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
+                continue;
+            }
+
+            // Process samples in the DrainLoop before sending to PlotManager and AudioMixService
+            _audioMixService.ProcessAndPlotPackets(batch, _plotManager);
+
+            // Track processed packets for diagnostics
+            System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
 
                     // If recording, write raw packets to disk (header + payload)
                     if (_recording)
@@ -718,25 +709,24 @@ namespace ADC_Rec
                     min = float.MaxValue; max = float.MinValue;
                     for (int i = 0; i < length; i++)
                     {
-                        uint raw = (uint)samples[i] & 0x00FFFFFFu;
-                        int vUnsigned = ConvertRawToUnsigned(raw);
-                        float v = (float)vUnsigned * scale;
+                        float v = samples[i] * scale;
                         if (v < min) min = v;
                         if (v > max) max = v;
                     }
-                    if (min == float.MaxValue || max == float.MinValue) { min = 0f; max = maxValue; }
+                    if (min == float.MaxValue || max == float.MinValue) { min = -1f; max = 1f; }
                     if (Math.Abs(max - min) < 1e-6f) { max = min + 1f; }
-                    mid = (min + max) / 2f;
-                    float maxAbs = Math.Max(Math.Abs(max - mid), Math.Abs(min - mid));
+                    // Processed samples are already centered around 0
+                    mid = 0f;
+                    float maxAbs = Math.Max(Math.Abs(max), Math.Abs(min));
                     min = -maxAbs;
                     max = maxAbs;
                 }
                 else
                 {
-                    // Fixed range: use full 16-bit range centered at 32768
-                    mid = maxValue / 2f; // 32768 - fixed center of 16-bit unsigned range
-                    min = -maxValue / 2f;
-                    max = maxValue / 2f;
+                    // Fixed range: -1.0 to 1.0
+                    mid = 0f;
+                    min = -1.0f;
+                    max = 1.0f;
                 }
                 float range = max - min;
                 if (range <= 0f) range = 1f; // fall back to sensible range to avoid div0
@@ -764,12 +754,8 @@ namespace ADC_Rec
                     float bmin = float.MaxValue, bmax = float.MinValue;
                     for (int k = s; k <= e && k < n; k++)
                     {
-                        // Convert raw sample to unsigned plotted value respecting plot bits and byte order
-                        uint raw = (uint)samples[k] & 0x00FFFFFFu;
-                        int vUnsigned = ConvertRawToUnsigned(raw);
-                        float v = (float)vUnsigned * scale;
-                        // Subtract midpoint to center around zero - always needed for signed display
-                        v -= mid;
+                        // Data is already processed (floats -1 to 1)
+                        float v = samples[k] * scale;
                         if (v < bmin) bmin = v;
                         if (v > bmax) bmax = v;
                     }
@@ -805,11 +791,7 @@ namespace ADC_Rec
                 // Draw a small red dot at the most recent sample (helps detect scrolling)
                 if (length > 0)
                 {
-                    // Convert last sample to signed plotted value
-                    uint rawLast = (uint)samples[length - 1] & 0x00FFFFFFu;
-                    int vLast = ConvertRawToUnsigned(rawLast);
-                    float last = (float)vLast * scale;
-                    last -= mid; // Always center around midpoint (AC-coupled view)
+                    float last = samples[length - 1] * scale;
                     double xLast = w; // most recent sample drawn at right edge
                     double yLast = h - ((last - min) / range) * h;
                     // Use cached brush
@@ -976,13 +958,12 @@ namespace ADC_Rec
                 long dropped = System.Threading.Interlocked.Add(ref _droppedPacketCount, 0);
                 long processed = System.Threading.Interlocked.Add(ref _processedPacketCount, 0);
                 int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
-                // collect per-channel snapshot counts and maximums for diagnostics
+                    // collect per-channel snapshot counts and maximums for diagnostics
                 var sbDiag = new System.Text.StringBuilder();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int avail = _plotManager.GetAvailableSamples(ch);
-                    uint maxRaw = _plotManager.GetMaxRaw(ch);
-                    sbDiag.Append($"ch{ch}: samples={avail} max=0x{maxRaw:X6}  ");
+                    sbDiag.Append($"ch{ch}: samples={avail}  ");
                 }
                 string drainInfo = ageMs < 0 ? "drainAge=NA" : $"drainAgeMs={ageMs}";
                 string diag = $"proc={processed} parsed={parsedPkts} invalid={invalidPkts} dropped={dropped} queue={queueCount} trimmedBytes={trimmedBytes} drainIters={drainIters} lastBatch={lastBatch} {drainInfo} {sbDiag.ToString()}";

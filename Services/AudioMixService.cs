@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Linq;
 using ADC_Rec.Models;
 using NAudio.Wave;
 
@@ -171,48 +172,44 @@ namespace ADC_Rec.Services
             _wavWriter = null;
         }
 
-        public void ProcessPackets(IEnumerable<Packet> packets)
+        public void ProcessAndPlotPackets(IEnumerable<Packet> packets, Managers.PlotManager plotManager)
         {
             if (packets == null) return;
 
             float[] gains = new float[Packet.NumChannels];
             float[] pans = new float[Packet.NumChannels];
+            bool dcEnabled;
             lock (_lock)
             {
                 Array.Copy(_channelGains, gains, Packet.NumChannels);
                 Array.Copy(_channelPans, pans, Packet.NumChannels);
-                // read once per batch for consistency
-            }
-            bool dcEnabled;
-            lock (_lock)
-            {
                 dcEnabled = _dcBlockEnabled;
             }
 
+            var batchList = packets.ToList();
+            int packetCount = batchList.Count;
+            float[][] processedBatch = new float[Packet.NumChannels][];
+            for (int ch = 0; ch < Packet.NumChannels; ch++) processedBatch[ch] = new float[packetCount * Packet.BufferLen];
+
+            int sampleIdx = 0;
             var outputSamples = new List<float>();
-            foreach (var pkt in packets)
+            foreach (var pkt in batchList)
             {
                 for (int i = 0; i < Packet.BufferLen; i++)
                 {
-                    float[] processedSamples = new float[Packet.NumChannels];
-                    for (int ch = 0; ch < Packet.NumChannels; ch++)
-                    {
-                        uint raw = pkt.Samples[ch, i];
-                        float sample = ConvertUnsignedToFloat(raw, 16); // Fixed 16-bit
-                        
-                        if (dcEnabled)
-                        {
-                            sample = ApplyAdaptiveDcBlock(sample, ch);
-                        }
-                        processedSamples[ch] = sample;
-                    }
-
                     float mixL = 0f;
                     float mixR = 0f;
                     for (int ch = 0; ch < Packet.NumChannels; ch++)
                     {
-                        float sample = processedSamples[ch];
+                        uint raw = pkt.Samples[ch, i];
+                        float sample = ConvertUnsignedToFloat(raw, 16);
+                        
+                        if (dcEnabled) sample = ApplyAdaptiveDcBlock(sample, ch);
+                        
                         float gain = gains[ch];
+                        sample *= gain; // Apply gain to the sample
+                        processedBatch[ch][sampleIdx] = sample;
+
                         float pan = pans[ch];
                         float angle = (pan + 1f) * 0.25f * (float)Math.PI;
                         float leftGain = (float)Math.Cos(angle);
@@ -220,10 +217,12 @@ namespace ADC_Rec.Services
                         mixL += sample * gain * leftGain;
                         mixR += sample * gain * rightGain;
                     }
-                    
+                    sampleIdx++;
                     StoreMonitorSample(mixL, mixR, outputSamples);
                 }
             }
+
+            plotManager.AddProcessedBatch(processedBatch);
 
             if (outputSamples.Count > 0)
             {
@@ -232,7 +231,6 @@ namespace ADC_Rec.Services
                 WriteWav(outputSamples);
             }
         }
-
         private static void StoreMonitorSample(float left, float right, List<float> outputSamples)
         {
             outputSamples.Add(left);

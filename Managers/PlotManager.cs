@@ -58,6 +58,31 @@ namespace ADC_Rec.Managers
             }
         }
 
+        // Add a batch of processed samples (already DC blocked and gain applied, float in range [-1, 1]).
+        public void AddProcessedBatch(float[][] processedSamples)
+        {
+            if (processedSamples == null || processedSamples.Length != Packet.NumChannels) return;
+            lock (_lock)
+            {
+                int len = processedSamples[0].Length;
+                for (int ch = 0; ch < Packet.NumChannels; ch++)
+                {
+                    for (int i = 0; i < len; i++)
+                    {
+                        float value = processedSamples[ch][i];
+                        int pos = _writeIndex[ch];
+                        _buffers[ch][pos] = value;
+                        // We no longer have raw 16-bit for these processed samples easily, 
+                        // but we need to track if we need it. 
+                        // For now, keep hover as the processed value.
+                        _rawBuffers[ch][pos] = (uint)Math.Max(0, Math.Min(0xFFFF, (value + 1f) * 32767.5f));
+                        _writeIndex[ch] = (pos + 1) % _capacity;
+                        if (_count[ch] < _capacity) _count[ch]++;
+                    }
+                }
+            }
+        }
+
         // Convenience for single packet
         public void AddPacket(Packet pkt, float voltsPerCycle, int plotBits)
         {
