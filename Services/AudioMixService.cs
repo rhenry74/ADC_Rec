@@ -365,9 +365,10 @@ namespace ADC_Rec.Services
 
         private static int FloatTo16Bit(float sample)
         {
-            sample = Math.Max(-1f, Math.Min(1f, sample));
+            // If we don't clamp, it clips naturally when cast to short
+            // This IS the hard clipper
             int v = (int)Math.Round(sample * 32767f);
-            return v;
+            return Math.Max(-32768, Math.Min(32767, v));
         }
 
         private float ApplyAdaptiveDcBlock(float sample, int channelIndex)
