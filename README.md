@@ -33,19 +33,22 @@ The app uses a multi-threaded architecture to process serial data through parsin
 | Function | Description |
 |----------|-------------|
 | `MainWindow.DrainLoop()` | Runs on dedicated background thread. Continuously: |
-| - Dequeues up to 2048 packets from `_packetQueue` | |
-| - `_plotManager.AddPacketsBatch(batch)` | Stores samples in circular buffers for waveform display |
-| - `_audioMixService.ProcessPackets(batch)` | **KEY FUNCTION - sends to audio** |
+| - Dequeues packets from `_packetQueue` (up to 256 per iteration) | |
+| - `_audioMixService.ProcessAndPlotPackets(batch, _plotManager)` | **KEY FUNCTION - processes samples, mixes, and updates plot manager** |
 
 ---
 
-## Audio Processing (Called from Drain Thread)
+## Audio & Plot Processing (Called from Drain Thread)
 | Function | Description |
 |----------|-------------|
-| `AudioMixService.ProcessPackets()` | Takes batch of packets, processes each sample: |
+| `AudioMixService.ProcessAndPlotPackets()` | Takes batch of packets, processes each sample: |
 | - `ConvertUnsignedToFloat()` | Converts 16-bit unsigned → float [-1, 1] |
-| - Applies gain & pan per channel | Stereo mixing: 4ch → 2ch (L/R) |
-| - `ApplyDcBlock()` | DC offset removal (optional) |
+| - `ApplyAdaptiveDcBlock()` | Adaptive DC offset removal |
+| - Stereo Mixing | 4 channels → 2 channels (L/R) using gain and pan |
+| - Updates Metering | Calculates LED levels, peaks, and averages |
+| - Sends to `PlotManager` | Stores processed samples for waveform display |
+| - `WritePlayback()` | **Sends to NAudio output** |
+| - `WriteWav()` | Optional: writes to WAV file |
 | - `StoreMonitorSample()` | Adds to output list |
 | - `UpdateMeters()` | Calculates peak/avg for LED meters |
 | - `WritePlayback()` | **Sends to NAudio output** |

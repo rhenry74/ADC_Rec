@@ -63,7 +63,7 @@ namespace ADC_Rec
         private int _lastDrainTick = 0;
         private bool _drainStartedLogged = false;
         private bool _drainIdleLogged = false;
-        private const int DrainBatchSize = 2048;
+        private const int DrainBatchSize = 256;
         private const int DrainIdleMs = 1;
         private const int DrainHighWaterMark = MaxPacketQueue;
         private const int DrainTargetQueue = MaxPacketQueue / 2;
@@ -699,13 +699,11 @@ namespace ADC_Rec
                 if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
 
                 float min, max;
-                float mid;
-                int bits = 16; // Fixed 16-bit data
-                int maxValue = (1 << bits) - 1;
-
+                
+                // Processed samples are floats in range [-1, 1], centered around 0
+                // Fit-to-data logic for [-1, 1] data:
                 if (_fitToData)
                 {
-                    // Autoscale: find min/max of current data and center around its midpoint
                     min = float.MaxValue; max = float.MinValue;
                     for (int i = 0; i < length; i++)
                     {
@@ -714,31 +712,28 @@ namespace ADC_Rec
                         if (v > max) max = v;
                     }
                     if (min == float.MaxValue || max == float.MinValue) { min = -1f; max = 1f; }
-                    if (Math.Abs(max - min) < 1e-6f) { max = min + 1f; }
-                    // Processed samples are already centered around 0
-                    mid = 0f;
+                    // Ensure we don't zoom in too much on constant DC
+                    if (Math.Abs(max - min) < 1e-6f) { max = min + 0.1f; min -= 0.1f; }
+                    // Scale to fit: keep zero center
                     float maxAbs = Math.Max(Math.Abs(max), Math.Abs(min));
                     min = -maxAbs;
                     max = maxAbs;
                 }
                 else
                 {
-                    // Fixed range: -1.0 to 1.0
-                    mid = 0f;
+                    // Fixed range
                     min = -1.0f;
                     max = 1.0f;
                 }
                 float range = max - min;
-                if (range <= 0f) range = 1f; // fall back to sensible range to avoid div0
+                if (range <= 0f) range = 1f; 
 
-                // Decimate to canvas width using min/max per bucket
                 int n = length;
                 int pixelWidth = (int)w;
                 if (pixelWidth < 16) pixelWidth = 16;
                 int buckets = Math.Min(pixelWidth, n);
                 double bucketSize = (double)n / buckets;
 
-                // Use cached brush instead of creating new one each frame
                 var poly = new Microsoft.UI.Xaml.Shapes.Polyline
                 {
                     Stroke = _brushLime,
@@ -754,7 +749,6 @@ namespace ADC_Rec
                     float bmin = float.MaxValue, bmax = float.MinValue;
                     for (int k = s; k <= e && k < n; k++)
                     {
-                        // Data is already processed (floats -1 to 1)
                         float v = samples[k] * scale;
                         if (v < bmin) bmin = v;
                         if (v > bmax) bmax = v;
@@ -769,11 +763,10 @@ namespace ADC_Rec
 
                 poly.Points = pts;
 
-                // Draw zero baseline if zero lies within visible range (helps to see offset)
+                // Draw zero baseline
                 if (min <= 0 && max >= 0)
                 {
                     double y0 = h - ((0 - min) / range) * h;
-                    // Use cached brush
                     var baseline = new Microsoft.UI.Xaml.Shapes.Line
                     {
                         X1 = 0,
@@ -788,13 +781,12 @@ namespace ADC_Rec
 
                 canvas.Children.Add(poly);
 
-                // Draw a small red dot at the most recent sample (helps detect scrolling)
+                // Last point
                 if (length > 0)
                 {
                     float last = samples[length - 1] * scale;
-                    double xLast = w; // most recent sample drawn at right edge
+                    double xLast = w;
                     double yLast = h - ((last - min) / range) * h;
-                    // Use cached brush
                     var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
                     {
                         Width = 4,

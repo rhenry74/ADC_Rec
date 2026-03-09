@@ -113,7 +113,7 @@ namespace ADC_Rec.Services
             var monitorFormat = WaveFormat.CreateIeeeFloatWaveFormat(InputSampleRate, OutputChannels);
             _playbackBuffer = new BufferedWaveProvider(monitorFormat)
             {
-                BufferLength = InputSampleRate * OutputChannels * sizeof(float) * 4, // 4 seconds
+                BufferLength = InputSampleRate * OutputChannels * sizeof(float) / 2, // 0.5 seconds
                 DiscardOnBufferOverflow = true
             };
 
@@ -172,9 +172,9 @@ namespace ADC_Rec.Services
             _wavWriter = null;
         }
 
-        public void ProcessAndPlotPackets(IEnumerable<Packet> packets, Managers.PlotManager plotManager)
+        public float[][] ProcessAndPlotPackets(IEnumerable<Packet> packets, Managers.PlotManager plotManager)
         {
-            if (packets == null) return;
+            if (packets == null) return Array.Empty<float[]>();
 
             float[] gains = new float[Packet.NumChannels];
             float[] pans = new float[Packet.NumChannels];
@@ -207,8 +207,8 @@ namespace ADC_Rec.Services
                         if (dcEnabled) sample = ApplyAdaptiveDcBlock(sample, ch);
                         
                         float gain = gains[ch];
-                        sample *= gain; // Apply gain to the sample
-                        processedBatch[ch][sampleIdx] = sample;
+                        // Save processed sample to batch before mixing (so plot shows gain)
+                        processedBatch[ch][sampleIdx] = sample * gain;
 
                         float pan = pans[ch];
                         float angle = (pan + 1f) * 0.25f * (float)Math.PI;
@@ -230,7 +230,9 @@ namespace ADC_Rec.Services
                 WritePlayback(outputSamples);
                 WriteWav(outputSamples);
             }
+            return processedBatch;
         }
+
         private static void StoreMonitorSample(float left, float right, List<float> outputSamples)
         {
             outputSamples.Add(left);
@@ -287,24 +289,8 @@ namespace ADC_Rec.Services
             int frameSamples = 0;
             for (int i = 0; i < outputSamples.Count; i += 2)
             {
-                // VU meters should measure the amplitude (absolute value)
-                // If DC Block is OFF, raw samples are centered on DC bias.
-                // Convert to AC-only amplitude for the VU meter logic.
                 float l = Math.Abs(outputSamples[i]);
                 float r = Math.Abs(outputSamples[i + 1]);
-
-                // Adjust for DC offset if DC Block is OFF
-                if (!_dcBlockEnabled)
-                {
-                    // If DC block is OFF, the signal is on a DC bias.
-                    // A 16-bit signal (32767 peak) has a mid-point bias.
-                    // This means a full-scale signal (0 to 65535) centers on 32767.
-                    // When converted to [-1, 1], the center is 0.0.
-                    // The range is effectively doubled in terms of magnitude if DC isn't removed.
-                    l *= 0.5f;
-                    r *= 0.5f;
-                }
-
                 if (l > peakL) peakL = l;
                 if (r > peakR) peakR = r;
                 sumL += l;
@@ -363,23 +349,15 @@ namespace ADC_Rec.Services
 
         private static int FloatTo16Bit(float sample)
         {
-            // If we don't clamp, it clips naturally when cast to short
-            // This IS the hard clipper
             int v = (int)Math.Round(sample * 32767f);
             return Math.Max(-32768, Math.Min(32767, v));
         }
 
         private float ApplyAdaptiveDcBlock(float sample, int channelIndex)
         {
-            // Always track the estimate to handle steady-state DC offsets.
-            // Using a slightly faster time constant allows tracking moving offsets,
-            // but is still slow enough not to affect audio frequencies.
-            const float tau = 0.5f; // 0.5 seconds
+            const float tau = 0.5f; 
             const float alpha = 1.0f / (tau * 44100.0f);
-
-            // Always update, no threshold-based freeze to allow steady-state DC removal
             _dcChannelEstimates[channelIndex] += alpha * (sample - _dcChannelEstimates[channelIndex]);
-
             return sample - _dcChannelEstimates[channelIndex];
         }
 
