@@ -111,9 +111,10 @@ namespace ADC_Rec.Services
         {
             if (_playbackStarted) return;
             var monitorFormat = WaveFormat.CreateIeeeFloatWaveFormat(InputSampleRate, OutputChannels);
+            // Use SampleProvider to work with floats directly without manual byte conversion
             _playbackBuffer = new BufferedWaveProvider(monitorFormat)
             {
-                BufferLength = InputSampleRate * OutputChannels * sizeof(float) / 2, // 0.5 seconds
+                BufferLength = (InputSampleRate * OutputChannels * sizeof(float)) / 3,    
                 DiscardOnBufferOverflow = true
             };
 
@@ -355,7 +356,8 @@ namespace ADC_Rec.Services
 
         private float ApplyAdaptiveDcBlock(float sample, int channelIndex)
         {
-            const float tau = 0.5f; 
+            // Use a higher time constant to be less aggressive and reduce baseline shifting
+            const float tau = 2.0f; 
             const float alpha = 1.0f / (tau * 44100.0f);
             _dcChannelEstimates[channelIndex] += alpha * (sample - _dcChannelEstimates[channelIndex]);
             return sample - _dcChannelEstimates[channelIndex];

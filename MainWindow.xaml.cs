@@ -904,6 +904,32 @@ namespace ADC_Rec
             }
         }
 
+        private void MaxGainCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            var combo = sender as ComboBox;
+            if (combo == null || combo.SelectedItem == null) return;
+            var item = combo.SelectedItem as ComboBoxItem;
+            if (item == null) return;
+
+            float maxGain = float.Parse(item.Content.ToString());
+            float smallChange = float.Parse(item.Tag.ToString());
+
+            Slider? targetSlider = null;
+            if (combo == MaxGainCombo0) targetSlider = GainSlider0;
+            else if (combo == MaxGainCombo1) targetSlider = GainSlider1;
+            else if (combo == MaxGainCombo2) targetSlider = GainSlider2;
+            else if (combo == MaxGainCombo3) targetSlider = GainSlider3;
+
+            if (targetSlider != null)
+            {
+                targetSlider.Maximum = maxGain;
+                targetSlider.SmallChange = smallChange;
+                targetSlider.StepFrequency = smallChange;
+                // Ensure value does not exceed new maximum
+                if (targetSlider.Value > maxGain) targetSlider.Value = maxGain;
+            }
+        }
+
         private void GainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
         {
             if (_audioMixService == null) return;
