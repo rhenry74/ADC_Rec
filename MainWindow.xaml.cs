@@ -41,7 +41,6 @@ namespace ADC_Rec
         private System.Threading.Timer? _counterTimer = null; // updates bytes-per-channel UI every 200ms
         private int _displayWindowSamples = 44100; // default 1s
         private int _sampleRate = 44100; // default sample rate
-        private int _plotBits = 16; // default plot bits (user-selectable)
         private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
         private const int MaxPacketBatchPerTick = 64;
         private const int MaxPacketQueue = 4096; // if exceeded, drop oldest packets to keep memory bounded
@@ -64,7 +63,7 @@ namespace ADC_Rec
         private int _lastDrainTick = 0;
         private bool _drainStartedLogged = false;
         private bool _drainIdleLogged = false;
-        private const int DrainBatchSize = 2048;
+        private const int DrainBatchSize = 256;
         private const int DrainIdleMs = 1;
         private const int DrainHighWaterMark = MaxPacketQueue;
         private const int DrainTargetQueue = MaxPacketQueue / 2;
@@ -84,12 +83,37 @@ namespace ADC_Rec
 
         // Reusable display buffers to avoid allocations
         private float[][] _displayBuffers = new float[Models.Packet.NumChannels][];
-        private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 24-bit samples for hover
+        private uint[][] _displayRawBuffers = new uint[Models.Packet.NumChannels][]; // raw 16-bit samples for hover
         private long[] _bytesPerChannel = new long[Models.Packet.NumChannels]; // parsed bytes per channel (cumulative)
         private uint[] _hoverRaw = new uint[1];
         private readonly System.Collections.Generic.List<Rectangle> _meterLeftRects = new System.Collections.Generic.List<Rectangle>();
         private readonly System.Collections.Generic.List<Rectangle> _meterRightRects = new System.Collections.Generic.List<Rectangle>();
         private const int MeterLedCount = 20;
+
+        // Cached brushes to avoid per-frame allocations
+        private readonly SolidColorBrush _brushLime = new SolidColorBrush(Microsoft.UI.Colors.Lime);
+        private readonly SolidColorBrush _brushRed = new SolidColorBrush(Microsoft.UI.Colors.Red);
+        private readonly SolidColorBrush _brushBlack = new SolidColorBrush(Microsoft.UI.Colors.Black);
+        private readonly SolidColorBrush _brushYellow = new SolidColorBrush(Microsoft.UI.Colors.Yellow);
+        private readonly SolidColorBrush _brushGreen = new SolidColorBrush(Microsoft.UI.Colors.Green);
+        private readonly SolidColorBrush _brushDimGray = new SolidColorBrush(Microsoft.UI.Colors.DimGray);
+
+        // Reusable drawing objects to avoid per-frame allocations
+        private readonly Polyline[] _channelPolylines = new Polyline[Models.Packet.NumChannels];
+        private readonly Line[] _channelBaselines = new Line[Models.Packet.NumChannels];
+        private readonly Ellipse[] _channelDots = new Ellipse[Models.Packet.NumChannels];
+        private readonly PointCollection[] _channelPoints = new PointCollection[Models.Packet.NumChannels];
+        
+        // Track if drawing objects have been initialized
+        private bool _drawingObjectsInitialized = false;
+        
+        // Track log text length to avoid rebuilding entire string
+        private int _logTextLength = 0;
+        private const int MaxLogChars = 200000;
+        private const int TrimLogChars = 50000; // Trim this many chars when limit reached
+
+        // UI enable/disable for maximum performance mode
+        private bool _uiEnabled = true;
 
         public MainWindow()
         {
@@ -115,8 +139,6 @@ namespace ADC_Rec
             // initialize counters and counter timer (stopped until capture starts)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++) _bytesPerChannel[ch] = 0;
             _counterTimer = new System.Threading.Timer(_ => UpdateBytesUi(), null, Timeout.Infinite, 200);
-            // Plot bits NumberBox initialized below (spinner control)
-            if (PlotBitsNumberBox != null) PlotBitsNumberBox.Value = _plotBits;
 
             // Fit-to-data checkbox hookup (if exists)
             if (FitToDataCheck != null)
@@ -141,11 +163,12 @@ namespace ADC_Rec
                 VerboseCheckbox.Unchecked += (s, e) => { _parser.Verbose = false; _logQueue.Enqueue("Verbose OFF"); };
             }
 
-            // PlotBits numberbox and ReverseBytes checkbox hookup (if exists)
-            if (PlotBitsNumberBox != null)
+            // UI enabled checkbox hookup (if exists) - disables UI for max performance
+            if (UiEnabledCheck != null)
             {
-                PlotBitsNumberBox.Value = _plotBits;
-                // ValueChanged is wired in XAML; additional hookup not required here.
+                UiEnabledCheck.IsChecked = _uiEnabled;
+                UiEnabledCheck.Checked += (s, e) => { _uiEnabled = true; _logQueue.Enqueue("UI: ON"); };
+                UiEnabledCheck.Unchecked += (s, e) => { _uiEnabled = false; _logQueue.Enqueue("UI: OFF (max performance)"); };
             }
 
             // Show hover/last-value labels all the time (initialize)
@@ -196,24 +219,18 @@ namespace ADC_Rec
         private void ForceRedraw()
         {
             _ = DispatcherQueue.TryEnqueue(() => {
-                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
-                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
-                        : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
+                    DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
                 }
             });
         }
 
         private int ConvertRawToUnsigned(uint raw)
         {
-            return (int)(raw & 0x00FFFFFFu);
+            return (int)(raw & 0xFFFFu);
         }
 
         private void MainWindow_Activated(object sender, Microsoft.UI.Xaml.WindowActivatedEventArgs e)
@@ -264,10 +281,10 @@ namespace ADC_Rec
             _packetQueue.Enqueue(pkt);
             System.Threading.Interlocked.Increment(ref _pendingPacketCount);
 
-            // Track parsed bytes per channel (each sample is 3 bytes)
+                    // Track parsed bytes per channel (each sample is 2 bytes)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
             {
-                System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 3);
+                System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 2);
             }
 
             // Enforce bounded queue immediately to avoid unbounded memory growth when parsing is faster than drain
@@ -312,23 +329,19 @@ namespace ADC_Rec
             // UI refresh only; background drain feeds the plot manager at full speed
             if (!_running && !_replaying) return;
 
-
+            // If UI is disabled, skip all UI rendering but keep the timer running for drain to continue
+            if (!_uiEnabled) return;
 
             // trigger single UI update (fill display buffers then draw) and flush logs occasionally
             _ = DispatcherQueue.TryEnqueue(() =>
             {
                 bool anyDrawn = false;
-                var gainSnapshot = _audioMixService?.GetChannelGainsSnapshot();
-                var bitsSnapshot = _audioMixService?.GetChannelInputBitsSnapshot();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    float gain = gainSnapshot != null && ch < gainSnapshot.Length ? gainSnapshot[ch] : 1f;
-                    float scaleTo24 = bitsSnapshot != null && ch < bitsSnapshot.Length
-                        ? Services.AudioMixService.GetScaleTo24BitCounts(bitsSnapshot[ch])
-                        : 1f;
                     var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    DrawChannel(canvas, _displayBuffers[ch], n, gain * scaleTo24);
+                    // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
+                    DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
                     if (n > 0) anyDrawn = true;
                 }
 
@@ -378,12 +391,19 @@ namespace ADC_Rec
             if (rect == null) return;
             int thresholdRed = (int)Math.Ceiling(MeterLedCount * 0.9);
             int thresholdYellow = (int)Math.Ceiling(MeterLedCount * 0.6);
-            var color = index >= thresholdRed
-                ? Microsoft.UI.Colors.Red
-                : index >= thresholdYellow
-                    ? Microsoft.UI.Colors.Yellow
-                    : Microsoft.UI.Colors.LimeGreen;
-            rect.Fill = new SolidColorBrush(lit > 0.5f ? color : Microsoft.UI.Colors.Black);
+            // Use cached brushes instead of creating new ones each frame
+            SolidColorBrush brushToUse;
+            if (lit > 0.5f)
+            {
+                if (index >= thresholdRed) brushToUse = _brushRed;
+                else if (index >= thresholdYellow) brushToUse = _brushYellow;
+                else brushToUse = _brushGreen;
+            }
+            else
+            {
+                brushToUse = _brushBlack;
+            }
+            rect.Fill = brushToUse;
         }
 
         private void FlushLogsAndUpdateQueueStatus()
@@ -407,13 +427,30 @@ namespace ADC_Rec
 
             if (flushed > 0)
             {
-                const int MaxChars = 200_000;
-                string add = sb.ToString();
-                string t = (LogTextBox.Text ?? string.Empty) + add;
-                if (t.Length > MaxChars) t = t.Substring(t.Length - MaxChars);
-                LogTextBox.Text = t;
-                LogTextBox.SelectionStart = t.Length;
-                LogTextBox.SelectionLength = 0;
+                // Efficiently append new text instead of rebuilding entire string
+                string newText = sb.ToString();
+                try
+                {
+                    // Use TextBox.AppendText which is more efficient than replacing .Text
+                    if (LogTextBox != null)
+                    {
+                        int currentLen = LogTextBox.Text?.Length ?? 0;
+                        // Only trim if we're over the limit
+                        if (currentLen + newText.Length > MaxLogChars)
+                        {
+                            // Keep only the last TrimLogChars characters from existing text
+                            int keepStart = Math.Max(0, currentLen - TrimLogChars);
+                            string trimmedText = (LogTextBox.Text ?? string.Empty).Substring(keepStart);
+                            LogTextBox.Text = trimmedText + newText;
+                        }
+                        else
+                        {
+                            LogTextBox.Text = (LogTextBox.Text ?? string.Empty) + newText;
+                        }
+                        LogTextBox.SelectionStart = LogTextBox.Text.Length;
+                    }
+                }
+                catch { }
             }
 
             // update queue count display
@@ -578,15 +615,17 @@ namespace ADC_Rec
                     }
                     _lastDrainBatchCount = batch.Count;
                     _lastDrainTick = Environment.TickCount;
-                    if (batch.Count == 0)
-                    {
-                        await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
-                        continue;
-                    }
-                    _plotManager.AddPacketsBatch(batch, 0f, _plotBits);
-                    _audioMixService?.ProcessPackets(batch);
-                    // Track processed packets for diagnostics
-                    System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
+            if (batch.Count == 0)
+            {
+                await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
+                continue;
+            }
+
+            // Process samples in the DrainLoop before sending to PlotManager and AudioMixService
+            _audioMixService.ProcessAndPlotPackets(batch, _plotManager);
+
+            // Track processed packets for diagnostics
+            System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
 
                     // If recording, write raw packets to disk (header + payload)
                     if (_recording)
@@ -605,13 +644,11 @@ namespace ADC_Rec
                                         {
                                             for (int i = 0; i < Models.Packet.BufferLen; i++)
                                             {
-                                                uint v = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                                                uint v = pkt.Samples[ch, i];
                                                 byte b0 = (byte)(v & 0xFF);
                                                 byte b1 = (byte)((v >> 8) & 0xFF);
-                                                byte b2 = (byte)((v >> 16) & 0xFF);
                                                 _recordWriter.Write(b0);
                                                 _recordWriter.Write(b1);
-                                                _recordWriter.Write(b2);
                                             }
                                         }
                                     }
@@ -662,38 +699,35 @@ namespace ADC_Rec
                 if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
 
                 float min, max;
-                float mid = 0f;
-                int bits = Math.Max(1, Math.Min(24, _plotBits));
-                int maxValue = (1 << bits) - 1;
+                
+                // Processed samples are floats in range [-1, 1], centered around 0
+                // Fit-to-data logic for [-1, 1] data:
                 if (_fitToData)
                 {
-                    // Autoscale to snapshot data range using unsigned values, then center around midpoint (AC-coupled)
                     min = float.MaxValue; max = float.MinValue;
                     for (int i = 0; i < length; i++)
                     {
-                        uint raw = (uint)samples[i] & 0x00FFFFFFu;
-                        int vUnsigned = ConvertRawToUnsigned(raw);
-                        float v = (float)vUnsigned * scale;
+                        float v = samples[i] * scale;
                         if (v < min) min = v;
                         if (v > max) max = v;
                     }
-                    if (min == float.MaxValue || max == float.MinValue) { min = 0f; max = maxValue; }
-                    if (Math.Abs(max - min) < 1e-6f) { max = min + 1f; }
-                    mid = (min + max) / 2f;
-                    float maxAbs = Math.Max(Math.Abs(max - mid), Math.Abs(min - mid));
+                    if (min == float.MaxValue || max == float.MinValue) { min = -1f; max = 1f; }
+                    // Ensure we don't zoom in too much on constant DC
+                    if (Math.Abs(max - min) < 1e-6f) { max = min + 0.1f; min -= 0.1f; }
+                    // Scale to fit: keep zero center
+                    float maxAbs = Math.Max(Math.Abs(max), Math.Abs(min));
                     min = -maxAbs;
                     max = maxAbs;
                 }
                 else
                 {
-                    // Use a fixed plotting range based on selected bit depth: [0 .. 2^bits-1]
-                    min = 0f;
-                    max = maxValue;
+                    // Fixed range
+                    min = -1.0f;
+                    max = 1.0f;
                 }
                 float range = max - min;
-                if (range <= 0f) range = 1f; // fall back to sensible range to avoid div0
+                if (range <= 0f) range = 1f; 
 
-                // Decimate to canvas width using min/max per bucket
                 int n = length;
                 int pixelWidth = (int)w;
                 if (pixelWidth < 16) pixelWidth = 16;
@@ -702,7 +736,7 @@ namespace ADC_Rec
 
                 var poly = new Microsoft.UI.Xaml.Shapes.Polyline
                 {
-                    Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Lime),
+                    Stroke = _brushLime,
                     StrokeThickness = 1
                 };
                 var pts = new Microsoft.UI.Xaml.Media.PointCollection();
@@ -715,11 +749,7 @@ namespace ADC_Rec
                     float bmin = float.MaxValue, bmax = float.MinValue;
                     for (int k = s; k <= e && k < n; k++)
                     {
-                        // Convert raw sample to unsigned plotted value respecting plot bits and byte order
-                        uint raw = (uint)samples[k] & 0x00FFFFFFu;
-                        int vUnsigned = ConvertRawToUnsigned(raw);
-                        float v = (float)vUnsigned * scale;
-                        if (_fitToData) v -= mid;
+                        float v = samples[k] * scale;
                         if (v < bmin) bmin = v;
                         if (v > bmax) bmax = v;
                     }
@@ -733,7 +763,7 @@ namespace ADC_Rec
 
                 poly.Points = pts;
 
-                // Draw zero baseline if zero lies within visible range (helps to see offset)
+                // Draw zero baseline
                 if (min <= 0 && max >= 0)
                 {
                     double y0 = h - ((0 - min) / range) * h;
@@ -743,7 +773,7 @@ namespace ADC_Rec
                         Y1 = y0,
                         X2 = w,
                         Y2 = y0,
-                        Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.DimGray),
+                        Stroke = _brushDimGray,
                         StrokeThickness = 1
                     };
                     canvas.Children.Add(baseline);
@@ -751,21 +781,17 @@ namespace ADC_Rec
 
                 canvas.Children.Add(poly);
 
-                // Draw a small red dot at the most recent sample (helps detect scrolling)
+                // Last point
                 if (length > 0)
                 {
-                    // Convert last sample to signed plotted value
-                    uint rawLast = (uint)samples[length - 1] & 0x00FFFFFFu;
-                    int vLast = ConvertRawToUnsigned(rawLast);
-                    float last = (float)vLast * scale;
-                    if (_fitToData) last -= mid;
-                    double xLast = w; // most recent sample drawn at right edge
+                    float last = samples[length - 1] * scale;
+                    double xLast = w;
                     double yLast = h - ((last - min) / range) * h;
                     var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
                     {
                         Width = 4,
                         Height = 4,
-                        Fill = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Red)
+                        Fill = _brushRed
                     };
                     Canvas.SetLeft(dot, Math.Max(0, xLast - 2));
                     Canvas.SetTop(dot, Math.Max(0, yLast - 2));
@@ -797,21 +823,20 @@ namespace ADC_Rec
             if (_packetQueue.TryDequeue(out var pkt))
             {
                 System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
-                int payloadLen = Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
+                int payloadLen = Models.Packet.NumChannels * Models.Packet.BufferLen * 2;
                 int totalLen = 2 + payloadLen;
                 _logQueue.Enqueue($"Packet dump (raw {totalLen} bytes):");
                 // Header bytes on their own line
                 _logQueue.Enqueue("0x55,0xAA,");
-                // Per-channel samples (3 bytes LSB-first) with integer value shown
+                // Per-channel samples (2 bytes LSB-first for 16-bit) with integer value shown
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     for (int i = 0; i < Models.Packet.BufferLen; i++)
                     {
-                        uint v = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                        uint v = pkt.Samples[ch, i];
                         byte b0 = (byte)(v & 0xFF);
                         byte b1 = (byte)((v >> 8) & 0xFF);
-                        byte b2 = (byte)((v >> 16) & 0xFF);
-                        _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2},0x{b2:X2}, = CH{ch}, {v}");
+                        _logQueue.Enqueue($"0x{b0:X2},0x{b1:X2}, = CH{ch}, {v}");
                     }
                     // separator line between channels for readability
                     _logQueue.Enqueue(string.Empty);
@@ -822,7 +847,7 @@ namespace ADC_Rec
             // Fallback: Dump a compact textual snapshot of recent samples for each channel
             _ = DispatcherQueue.TryEnqueue(() =>
             {
-                int dumpSamples = Math.Min(128, _displayWindowSamples);
+                int dumpSamples = Math.Min(Models.Packet.BufferLen, _displayWindowSamples);
                 AddLog($"Dumping last {dumpSamples} samples per channel (most recent last):");
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
@@ -879,29 +904,30 @@ namespace ADC_Rec
             }
         }
 
-        private void PlotBitsNumberBox_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.NumberBoxValueChangedEventArgs e)
+        private void MaxGainCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            try
+            var combo = sender as ComboBox;
+            if (combo == null || combo.SelectedItem == null) return;
+            var item = combo.SelectedItem as ComboBoxItem;
+            if (item == null) return;
+
+            float maxGain = float.Parse(item.Content.ToString());
+            float smallChange = float.Parse(item.Tag.ToString());
+
+            Slider? targetSlider = null;
+            if (combo == MaxGainCombo0) targetSlider = GainSlider0;
+            else if (combo == MaxGainCombo1) targetSlider = GainSlider1;
+            else if (combo == MaxGainCombo2) targetSlider = GainSlider2;
+            else if (combo == MaxGainCombo3) targetSlider = GainSlider3;
+
+            if (targetSlider != null)
             {
-                int bits = (int)Math.Round(e.NewValue);
-                bits = Math.Max(8, Math.Min(24, bits));
-                if (bits == _plotBits) return;
-                _plotBits = bits;
-                _logQueue.Enqueue($"Plot bits set to {_plotBits} (spinner)");
-                // If Fit-to-data is enabled, autoscale will hide the effect of changing bit depth. Disable it so the change is visible.
-                try
-                {
-                    if (FitToDataCheck != null && FitToDataCheck.IsChecked == true)
-                    {
-                        FitToDataCheck.IsChecked = false;
-                        _fitToData = false;
-                        _logQueue.Enqueue("Fit to data: OFF (disabled to apply plot bits)");
-                    }
-                }
-                catch { }
-                ForceRedraw();
+                targetSlider.Maximum = maxGain;
+                targetSlider.SmallChange = smallChange;
+                targetSlider.StepFrequency = smallChange;
+                // Ensure value does not exceed new maximum
+                if (targetSlider.Value > maxGain) targetSlider.Value = maxGain;
             }
-            catch (Exception ex) { _logQueue.Enqueue("PlotBits number change error: " + ex.Message); }
         }
 
         private void GainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
@@ -914,19 +940,6 @@ namespace ADC_Rec
             else if (slider == GainSlider1) { _audioMixService.SetChannelGain(1, gain); GainText1.Text = $"{gain:0.00}x"; }
             else if (slider == GainSlider2) { _audioMixService.SetChannelGain(2, gain); GainText2.Text = $"{gain:0.00}x"; }
             else if (slider == GainSlider3) { _audioMixService.SetChannelGain(3, gain); GainText3.Text = $"{gain:0.00}x"; }
-        }
-
-        private void InputBits_ValueChanged(object sender, NumberBoxValueChangedEventArgs e)
-        {
-            if (_audioMixService == null) return;
-            var box = sender as NumberBox;
-            if (box == null) return;
-            int bits = (int)Math.Round(box.Value);
-            bits = Math.Max(8, Math.Min(24, bits));
-            if (box == InputBits0) _audioMixService.SetChannelInputBits(0, bits);
-            else if (box == InputBits1) _audioMixService.SetChannelInputBits(1, bits);
-            else if (box == InputBits2) _audioMixService.SetChannelInputBits(2, bits);
-            else if (box == InputBits3) _audioMixService.SetChannelInputBits(3, bits);
         }
 
         private void PanSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
@@ -963,13 +976,12 @@ namespace ADC_Rec
                 long dropped = System.Threading.Interlocked.Add(ref _droppedPacketCount, 0);
                 long processed = System.Threading.Interlocked.Add(ref _processedPacketCount, 0);
                 int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
-                // collect per-channel snapshot counts and maximums for diagnostics
+                    // collect per-channel snapshot counts and maximums for diagnostics
                 var sbDiag = new System.Text.StringBuilder();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int avail = _plotManager.GetAvailableSamples(ch);
-                    uint maxRaw = _plotManager.GetMaxRaw(ch);
-                    sbDiag.Append($"ch{ch}: samples={avail} max=0x{maxRaw:X6}  ");
+                    sbDiag.Append($"ch{ch}: samples={avail}  ");
                 }
                 string drainInfo = ageMs < 0 ? "drainAge=NA" : $"drainAgeMs={ageMs}";
                 string diag = $"proc={processed} parsed={parsedPkts} invalid={invalidPkts} dropped={dropped} queue={queueCount} trimmedBytes={trimmedBytes} drainIters={drainIters} lastBatch={lastBatch} {drainInfo} {sbDiag.ToString()}";
@@ -1082,18 +1094,57 @@ namespace ADC_Rec
             }
         }
 
-        private void ReplayButton_Click(object sender, RoutedEventArgs e)
+        private CancellationTokenSource? _replayCts;
+
+        private async void ReplayButton_Click(object sender, RoutedEventArgs e)
         {
-            // Find most recent recording in Documents and replay it into the parser (offline)
+            // If already replaying, stop it
+            if (_replaying)
+            {
+                _replayCts?.Cancel();
+                AddLog("Replay stopped");
+                return;
+            }
+
+            // Use file picker to let user choose which recording to replay
             try
             {
-                string folder = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                var files = System.IO.Directory.GetFiles(folder, "ADCRec_*.bin");
-                if (files == null || files.Length == 0) { AddLog("No recordings found in Documents"); return; }
-                var path = files.OrderByDescending(f => f).First();
+                // Don't allow replay while COM is connected
+                if (_serialService?.IsConnected == true)
+                {
+                    AddLog("Cannot replay while COM port is connected");
+                    return;
+                }
+
+                // If recording, stop it first
+                if (_recording)
+                {
+                    lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
+                    _recording = false;
+                    _audioMixService.StopWavWrite();
+                    if (RecordButton != null) RecordButton.Content = "Start Record";
+                    AddLog("Recording stopped for replay");
+                }
+
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+                var picker = new Windows.Storage.Pickers.FileOpenPicker
+                {
+                    ViewMode = Windows.Storage.Pickers.PickerViewMode.List,
+                    SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.DocumentsLibrary
+                };
+                picker.FileTypeFilter.Add(".bin");
+                WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+                var file = await picker.PickSingleFileAsync();
+                if (file == null) return;
+
+                string path = file.Path;
                 AddLog($"Replaying {path}");
-                string wavPath = _audioMixService.StartWavWrite(folder);
-                AddLog($"Remix WAV: {wavPath}");
+                
+                // Create cancellation token for this replay
+                _replayCts = new CancellationTokenSource();
+                var token = _replayCts.Token;
+
                 if (!_running)
                 {
                     StartBackgroundDrain();
@@ -1106,17 +1157,40 @@ namespace ADC_Rec
                 {
                     try
                     {
-                        int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 3;
+                        int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 2;
                         using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
                         var buf = new byte[pktLen];
-                        while (true)
+                        
+                        // Calculate packets per second for real-time pacing
+                        // Each packet has BufferLen (8) samples per channel, 4 channels = 32 raw samples
+                        // After mixing to stereo: BufferLen (8) samples × 2 channels = 16 stereo samples
+                        // At 44100 Hz: 44100 / 16 = 2756 packets per second for 1 second of audio
+                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * 2);
+                        // Use batch size that gives us reasonable delay intervals (e.g., 50ms worth)
+                        int batchSize = Math.Max(1, packetsPerSecond / 20); // 1/20 second worth = ~138 packets
+                        
+                        while (!token.IsCancellationRequested)
                         {
-                            int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
-                            if (read < pktLen) break;
-                            _parser.Feed(buf);
-                            // approximate real-time pacing based on sample rate and buffer length
-                            int pps = Math.Max(1, _sampleRate / Models.Packet.BufferLen);
-                            await System.Threading.Tasks.Task.Delay(1000 / pps).ConfigureAwait(false);
+                            // Read a batch of packets
+                            for (int i = 0; i < batchSize; i++)
+                            {
+                                int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
+                                if (read < pktLen) 
+                                {
+                                    // Final few packets - process them and exit
+                                    if (read > 0) _parser.Feed(buf);
+                                    break;
+                                }
+                                _parser.Feed(buf);
+                            }
+                            
+                            // Check if we've reached end of file
+                            if (fs.Position >= fs.Length) break;
+                            
+                            // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
+                            // Use _rateRatioSmoothed to match what's displayed on screen
+                            int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
+                            await System.Threading.Tasks.Task.Delay(delayMs).ConfigureAwait(false);
                         }
                         _logQueue.Enqueue($"Replay finished: {path}");
                     }
@@ -1126,7 +1200,6 @@ namespace ADC_Rec
                     }
                     finally
                     {
-                        _audioMixService.StopWavWrite();
                         if (!_running)
                         {
                             StopBackgroundDrain();

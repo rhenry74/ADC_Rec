@@ -34,7 +34,7 @@ namespace ADC_Rec.Managers
         public void AddPacketsBatch(IEnumerable<Packet> pkts, float voltsPerCycle, int plotBits)
         {
             if (pkts == null) return;
-            int shift = Math.Max(0, 24 - Math.Max(1, Math.Min(24, plotBits)));
+            int shift = Math.Max(0, 16 - Math.Max(1, Math.Min(16, plotBits)));
             lock (_lock)
             {
                 foreach (var pkt in pkts)
@@ -43,16 +43,41 @@ namespace ADC_Rec.Managers
                     {
                         for (int i = 0; i < Packet.BufferLen; i++)
                         {
-                            uint raw24 = pkt.Samples[ch, i] & 0x00FFFFFFu;
+                            uint raw16 = (uint)pkt.Samples[ch, i];
                             // Store raw value (as float) and keep raw buffer; scaling to bit-depth or autoscale is done on draw
-                            float value = (float)raw24;
+                            float value = (float)raw16;
                             int pos = _writeIndex[ch];
                             _buffers[ch][pos] = value;
-                            // keep raw 24-bit available for hover/dump
-                            _rawBuffers[ch][pos] = raw24;
+                            // keep raw 16-bit available for hover/dump
+                            _rawBuffers[ch][pos] = raw16;
                             _writeIndex[ch] = (pos + 1) % _capacity;
                             if (_count[ch] < _capacity) _count[ch]++;
                         }
+                    }
+                }
+            }
+        }
+
+        // Add a batch of processed samples (already DC blocked and gain applied, float in range [-1, 1]).
+        public void AddProcessedBatch(float[][] processedSamples)
+        {
+            if (processedSamples == null || processedSamples.Length != Packet.NumChannels) return;
+            lock (_lock)
+            {
+                int len = processedSamples[0].Length;
+                for (int ch = 0; ch < Packet.NumChannels; ch++)
+                {
+                    for (int i = 0; i < len; i++)
+                    {
+                        float value = processedSamples[ch][i];
+                        int pos = _writeIndex[ch];
+                        _buffers[ch][pos] = value;
+                        // We no longer have raw 16-bit for these processed samples easily, 
+                        // but we need to track if we need it. 
+                        // For now, keep hover as the processed value.
+                        _rawBuffers[ch][pos] = (uint)Math.Max(0, Math.Min(0xFFFF, (value + 1f) * 32767.5f));
+                        _writeIndex[ch] = (pos + 1) % _capacity;
+                        if (_count[ch] < _capacity) _count[ch]++;
                     }
                 }
             }
@@ -86,7 +111,7 @@ namespace ADC_Rec.Managers
             }
         }
 
-        // Fill provided buffer with raw 24-bit samples (most recent last)
+        // Fill provided buffer with raw 16-bit samples (most recent last)
         public int FillChannelRawSnapshot(int ch, uint[] outBuf, int desiredSamples)
         {
             if (ch < 0 || ch >= Packet.NumChannels) return 0;
@@ -137,7 +162,7 @@ namespace ADC_Rec.Managers
             }
         }
 
-        // Return the maximum raw (24-bit) sample currently stored for channel ch
+        // Return the maximum raw (16-bit) sample currently stored for channel ch
         public uint GetMaxRaw(int ch)
         {
             if (ch < 0 || ch >= Packet.NumChannels) return 0u;

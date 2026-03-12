@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Linq;
 using ADC_Rec.Models;
 using NAudio.Wave;
 
@@ -12,27 +13,30 @@ namespace ADC_Rec.Services
         private const int InputSampleRate = 44100;
         private const int OutputSampleRate = 44100;
         private const int OutputChannels = 2;
-        private const int BitsPerSample = 24;
+        private const int BitsPerSample = 16;
         private const int LedCount = 20;
 
         private readonly object _lock = new object();
         private readonly float[] _channelGains = new float[Packet.NumChannels];
         private readonly float[] _channelPans = new float[Packet.NumChannels];
-        private readonly int[] _channelInputBits = new int[Packet.NumChannels];
 
         private WaveOutEvent? _waveOut;
         private BufferedWaveProvider? _playbackBuffer;
         private bool _playbackStarted;
 
-        private BufferedWaveProvider? _wavBuffer;
-        private MediaFoundationResampler? _wavResampler;
+        // WAV writing - separate from playback to avoid race conditions
+        private readonly object _wavLock = new object();
+        private List<float> _wavSampleBuffer = new List<float>();
 
         private BinaryWriter? _wavWriter;
         private bool _writeWav;
         private long _wavDataBytes;
+        private const int WavBufferSamplesMax = 44100 * 2 * 8; // 8 seconds max buffer
 
         private float _dcLeft;
         private float _dcRight;
+        private readonly float[] _dcChannelEstimates = new float[Packet.NumChannels];
+        
         private const float DcAlpha = 0.995f;
         private bool _dcBlockEnabled = true;
 
@@ -52,15 +56,7 @@ namespace ADC_Rec.Services
             {
                 _channelGains[ch] = 1.0f;
                 _channelPans[ch] = 0.0f;
-                _channelInputBits[ch] = 12;
             }
-        }
-
-        public void SetChannelInputBits(int ch, int bits)
-        {
-            if (ch < 0 || ch >= Packet.NumChannels) return;
-            bits = Math.Max(8, Math.Min(24, bits));
-            lock (_lock) { _channelInputBits[ch] = bits; }
         }
 
         public void SetChannelGain(int ch, float gain)
@@ -78,9 +74,10 @@ namespace ADC_Rec.Services
 
         public int[] GetChannelInputBitsSnapshot()
         {
-            var bits = new int[Packet.NumChannels];
-            lock (_lock) { Array.Copy(_channelInputBits, bits, Packet.NumChannels); }
-            return bits;
+            // Return default 16-bit for all channels (not 0!)
+            int[] result = new int[Packet.NumChannels];
+            for (int i = 0; i < result.Length; i++) result[i] = 16;
+            return result;
         }
 
         public void SetChannelPan(int ch, float pan)
@@ -114,22 +111,13 @@ namespace ADC_Rec.Services
         {
             if (_playbackStarted) return;
             var monitorFormat = WaveFormat.CreateIeeeFloatWaveFormat(InputSampleRate, OutputChannels);
+            // Use SampleProvider to work with floats directly without manual byte conversion
             _playbackBuffer = new BufferedWaveProvider(monitorFormat)
             {
-                BufferLength = InputSampleRate * OutputChannels * sizeof(float),
+                BufferLength = (InputSampleRate * OutputChannels * sizeof(float)) / 3,    
                 DiscardOnBufferOverflow = true
             };
 
-            var wavInputFormat = WaveFormat.CreateIeeeFloatWaveFormat(InputSampleRate, OutputChannels);
-            _wavBuffer = new BufferedWaveProvider(wavInputFormat)
-            {
-                BufferLength = InputSampleRate * OutputChannels * sizeof(float),
-                DiscardOnBufferOverflow = true
-            };
-            _wavResampler = new MediaFoundationResampler(_wavBuffer, new WaveFormat(OutputSampleRate, 32, OutputChannels))
-            {
-                ResamplerQuality = 60
-            };
             _waveOut = new WaveOutEvent();
             _waveOut.Init(_playbackBuffer);
             _waveOut.Play();
@@ -143,9 +131,6 @@ namespace ADC_Rec.Services
             try { _waveOut?.Dispose(); } catch { }
             _waveOut = null;
             _playbackBuffer = null;
-            _wavResampler?.Dispose();
-            _wavResampler = null;
-            _wavBuffer = null;
         }
 
         public string StartWavWrite(string folder)
@@ -156,6 +141,11 @@ namespace ADC_Rec.Services
             var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
             _wavWriter = new BinaryWriter(fs);
             _wavDataBytes = 0;
+            // Clear and initialize the WAV buffer
+            lock (_wavLock)
+            {
+                _wavSampleBuffer.Clear();
+            }
             WriteWavHeaderPlaceholder(_wavWriter);
             _writeWav = true;
             return path;
@@ -167,6 +157,15 @@ namespace ADC_Rec.Services
             if (_wavWriter == null) return;
             try
             {
+                // Flush any remaining samples in the buffer
+                lock (_wavLock)
+                {
+                    while (_wavSampleBuffer.Count > 0)
+                    {
+                        FlushWavBuffer();
+                    }
+                    _wavSampleBuffer.Clear();
+                }
                 UpdateWavHeader(_wavWriter, _wavDataBytes);
             }
             catch { }
@@ -174,28 +173,28 @@ namespace ADC_Rec.Services
             _wavWriter = null;
         }
 
-        public void ProcessPackets(IEnumerable<Packet> packets)
+        public float[][] ProcessAndPlotPackets(IEnumerable<Packet> packets, Managers.PlotManager plotManager)
         {
-            if (packets == null) return;
+            if (packets == null) return Array.Empty<float[]>();
 
             float[] gains = new float[Packet.NumChannels];
             float[] pans = new float[Packet.NumChannels];
-            int[] bits = new int[Packet.NumChannels];
+            bool dcEnabled;
             lock (_lock)
             {
                 Array.Copy(_channelGains, gains, Packet.NumChannels);
                 Array.Copy(_channelPans, pans, Packet.NumChannels);
-                Array.Copy(_channelInputBits, bits, Packet.NumChannels);
-                // read once per batch for consistency
-            }
-            bool dcEnabled;
-            lock (_lock)
-            {
                 dcEnabled = _dcBlockEnabled;
             }
 
+            var batchList = packets.ToList();
+            int packetCount = batchList.Count;
+            float[][] processedBatch = new float[Packet.NumChannels][];
+            for (int ch = 0; ch < Packet.NumChannels; ch++) processedBatch[ch] = new float[packetCount * Packet.BufferLen];
+
+            int sampleIdx = 0;
             var outputSamples = new List<float>();
-            foreach (var pkt in packets)
+            foreach (var pkt in batchList)
             {
                 for (int i = 0; i < Packet.BufferLen; i++)
                 {
@@ -203,9 +202,15 @@ namespace ADC_Rec.Services
                     float mixR = 0f;
                     for (int ch = 0; ch < Packet.NumChannels; ch++)
                     {
-                        uint raw = pkt.Samples[ch, i] & 0x00FFFFFFu;
-                        float sample = ConvertUnsignedToFloat(raw, bits[ch]);
+                        uint raw = pkt.Samples[ch, i];
+                        float sample = ConvertUnsignedToFloat(raw, 16);
+                        
+                        if (dcEnabled) sample = ApplyAdaptiveDcBlock(sample, ch);
+                        
                         float gain = gains[ch];
+                        // Save processed sample to batch before mixing (so plot shows gain)
+                        processedBatch[ch][sampleIdx] = sample * gain;
+
                         float pan = pans[ch];
                         float angle = (pan + 1f) * 0.25f * (float)Math.PI;
                         float leftGain = (float)Math.Cos(angle);
@@ -213,14 +218,12 @@ namespace ADC_Rec.Services
                         mixL += sample * gain * leftGain;
                         mixR += sample * gain * rightGain;
                     }
-                    if (dcEnabled)
-                    {
-                        mixL = ApplyDcBlock(mixL, ref _dcLeft);
-                        mixR = ApplyDcBlock(mixR, ref _dcRight);
-                    }
+                    sampleIdx++;
                     StoreMonitorSample(mixL, mixR, outputSamples);
                 }
             }
+
+            plotManager.AddProcessedBatch(processedBatch);
 
             if (outputSamples.Count > 0)
             {
@@ -228,6 +231,7 @@ namespace ADC_Rec.Services
                 WritePlayback(outputSamples);
                 WriteWav(outputSamples);
             }
+            return processedBatch;
         }
 
         private static void StoreMonitorSample(float left, float right, List<float> outputSamples)
@@ -242,28 +246,39 @@ namespace ADC_Rec.Services
             var bytes = new byte[outputSamples.Count * sizeof(float)];
             Buffer.BlockCopy(outputSamples.ToArray(), 0, bytes, 0, bytes.Length);
             _playbackBuffer.AddSamples(bytes, 0, bytes.Length);
-            _wavBuffer?.AddSamples(bytes, 0, bytes.Length);
         }
 
         private void WriteWav(List<float> outputSamples)
         {
             if (!_writeWav || _wavWriter == null) return;
-            if (_wavResampler == null) return;
-            var resampled = new float[outputSamples.Count];
-            int bytesNeeded = resampled.Length * sizeof(float);
-            var resampleBytes = new byte[bytesNeeded];
-            int bytesRead = _wavResampler.Read(resampleBytes, 0, bytesNeeded);
-            if (bytesRead <= 0) return;
-            int samplesRead = bytesRead / sizeof(float);
-            Buffer.BlockCopy(resampleBytes, 0, resampled, 0, bytesRead);
-            for (int i = 0; i < samplesRead; i++)
+
+            // Buffer samples for WAV writing (thread-safe)
+            lock (_wavLock)
             {
-                int v = FloatTo24Bit(resampled[i]);
-                _wavWriter.Write((byte)(v & 0xFF));
-                _wavWriter.Write((byte)((v >> 8) & 0xFF));
-                _wavWriter.Write((byte)((v >> 16) & 0xFF));
-                _wavDataBytes += 3;
+                _wavSampleBuffer.AddRange(outputSamples);
+
+                // Write in chunks to avoid blocking too long
+                while (_wavSampleBuffer.Count >= 4096)
+                {
+                    FlushWavBuffer();
+                }
             }
+        }
+
+        private void FlushWavBuffer()
+        {
+            if (_wavWriter == null || _wavSampleBuffer.Count == 0) return;
+
+            int toWrite = Math.Min(_wavSampleBuffer.Count, 4096);
+            for (int i = 0; i < toWrite; i++)
+            {
+                short v = (short)FloatTo16Bit(_wavSampleBuffer[i]);
+                _wavWriter.Write(v);
+                _wavDataBytes += 2;
+            }
+            _wavSampleBuffer.RemoveRange(0, toWrite);
+            // Flush to ensure data is written to disk
+            _wavWriter.Flush();
         }
 
         private void UpdateMeters(List<float> outputSamples)
@@ -283,6 +298,7 @@ namespace ADC_Rec.Services
                 sumR += r;
                 frameSamples++;
             }
+            
             UpdateLedArray(_meterLedsLeft, peakL);
             UpdateLedArray(_meterLedsRight, peakR);
 
@@ -310,7 +326,7 @@ namespace ADC_Rec.Services
 
         private static float ConvertUnsignedToFloat(uint raw, int inputBits)
         {
-            int bits = Math.Max(1, Math.Min(24, inputBits));
+            int bits = Math.Max(1, Math.Min(16, inputBits));
             int maxVal = (1 << bits) - 1;
             float mid = maxVal / 2f;
             float centered = raw - mid;
@@ -319,32 +335,32 @@ namespace ADC_Rec.Services
 
         public static float GetNormalizationGainForBits(int inputBits)
         {
-            int bits = Math.Max(1, Math.Min(24, inputBits));
+            int bits = Math.Max(1, Math.Min(16, inputBits));
             int maxVal = (1 << bits) - 1;
             float mid = maxVal / 2f;
             return 1f / Math.Max(1f, mid);
         }
 
-        public static float GetScaleTo24BitCounts(int inputBits)
+        public static float GetScaleTo16BitCounts(int inputBits)
         {
-            int bits = Math.Max(1, Math.Min(24, inputBits));
-            int shift = 24 - bits;
+            int bits = Math.Max(1, Math.Min(16, inputBits));
+            int shift = 16 - bits;
             return (float)(1 << Math.Max(0, shift));
         }
 
-        private static int FloatTo24Bit(float sample)
+        private static int FloatTo16Bit(float sample)
         {
-            sample = Math.Max(-1f, Math.Min(1f, sample));
-            int v = (int)Math.Round(sample * 8388607f);
-            if (v < 0) v += 1 << 24;
-            return v & 0x00FFFFFF;
+            int v = (int)Math.Round(sample * 32767f);
+            return Math.Max(-32768, Math.Min(32767, v));
         }
 
-        private static float ApplyDcBlock(float sample, ref float state)
+        private float ApplyAdaptiveDcBlock(float sample, int channelIndex)
         {
-            float outSample = sample - state;
-            state = sample + outSample * DcAlpha;
-            return outSample;
+            // Use a higher time constant to be less aggressive and reduce baseline shifting
+            const float tau = 2.0f; 
+            const float alpha = 1.0f / (tau * 44100.0f);
+            _dcChannelEstimates[channelIndex] += alpha * (sample - _dcChannelEstimates[channelIndex]);
+            return sample - _dcChannelEstimates[channelIndex];
         }
 
 

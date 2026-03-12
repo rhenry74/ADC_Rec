@@ -12,6 +12,8 @@ namespace ADC_Rec.Services
 
         public string[] GetPortNames() => SerialPort.GetPortNames();
 
+        public bool IsConnected => _port?.IsOpen ?? false;
+
         public bool Connect(string portName, int baud = 115200)
         {
             try
