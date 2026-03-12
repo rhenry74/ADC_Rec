@@ -1,3 +1,6 @@
+<img width="1906" height="1063" alt="image" src="https://github.com/user-attachments/assets/7e5a0c2c-ef96-4928-ad1a-68a94b9c6b3f" />
+
+
 # ADC_Rec — Data Flow Architecture
 
 ## Data Flow: Serial Ingest → Audio Monitor Output
