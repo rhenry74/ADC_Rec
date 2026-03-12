@@ -273,8 +273,6 @@ namespace ADC_Rec
             _parser.Feed(data);
         }
 
-
-
         private void Parser_PacketParsed(Models.Packet pkt)
         {
             // Enqueue packets quickly for batch processing by background drain
@@ -1298,6 +1296,48 @@ namespace ADC_Rec
             AddLog("Capture stopped");
             StatusTextBlock.Text = "Stopped";
             _audioMixService?.StopPlayback();
+        }
+
+        private void AddFilterButton_Click(object sender, RoutedEventArgs e)
+        {
+            var menu = new MenuFlyout();
+            var types = new[] { 
+                (Models.Filters.FilterType.PeakingEQ, "Peaking EQ"),
+                (Models.Filters.FilterType.LowShelf, "Low Shelf"),
+                (Models.Filters.FilterType.HighShelf, "High Shelf"),
+                (Models.Filters.FilterType.Compressor, "Compressor"),
+                (Models.Filters.FilterType.NoiseSuppression, "Noise Suppression")
+            };
+
+            foreach (var type in types)
+            {
+                var item = new MenuFlyoutItem { Text = type.Item2 };
+                item.Click += (s, ev) => AddFilter(type.Item1);
+                menu.Items.Add(item);
+            }
+            menu.ShowAt(AddFilterButton);
+        }
+
+        private void AddFilter(Models.Filters.FilterType type)
+        {
+            Models.Filters.IFilter filter = type switch
+            {
+                Models.Filters.FilterType.PeakingEQ => new Models.Filters.PeakingEQFilter(),
+                Models.Filters.FilterType.LowShelf => new Models.Filters.ShelfFilter(true),
+                Models.Filters.FilterType.HighShelf => new Models.Filters.ShelfFilter(false),
+                Models.Filters.FilterType.Compressor => new Models.Filters.CompressorFilter(),
+                Models.Filters.FilterType.NoiseSuppression => new Models.Filters.NoiseSuppressionFilter(),
+                _ => throw new ArgumentOutOfRangeException()
+            };
+
+            var control = new Controls.Filters.FilterCardControl(filter);
+            control.DeleteRequested += (s, ctrl) => 
+            {
+                FiltersRack.Children.Remove(ctrl);
+                // Note: Need to remove from AudioMixService._filters too if we exposed that
+            };
+            FiltersRack.Children.Add(control);
+            FiltersBorder.Visibility = Visibility.Visible;
         }
     }
 }
