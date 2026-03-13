@@ -19,6 +19,7 @@ namespace ADC_Rec.Services
         private readonly object _lock = new object();
         private readonly float[] _channelGains = new float[Packet.NumChannels];
         private readonly float[] _channelPans = new float[Packet.NumChannels];
+        public List<Models.Filters.IFilter> Filters => _filters;
         private readonly List<Models.Filters.IFilter> _filters = new List<Models.Filters.IFilter>();
 
         private WaveOutEvent? _waveOut;
@@ -225,10 +226,7 @@ namespace ADC_Rec.Services
                             {
                                 if ((filter.Channels & (Models.Filters.ChannelBinding)(1 << ch)) != 0)
                                 {
-                                    // Process single sample
-                                    float[] tempBuf = new[] { channelBuffers[ch] };
-                                    filter.Process(tempBuf, 0, 1, (Models.Filters.ChannelBinding)(1 << ch));
-                                    channelBuffers[ch] = tempBuf[0];
+                                    channelBuffers[ch] = filter.Process(channelBuffers[ch], (Models.Filters.ChannelBinding)(1 << ch));
                                 }
                             }
                         }
@@ -254,15 +252,11 @@ namespace ADC_Rec.Services
                         {
                             if ((filter.Channels & Models.Filters.ChannelBinding.L) != 0)
                             {
-                                float[] tempBuf = new[] { mixBuffer[0] };
-                                filter.Process(tempBuf, 0, 1, Models.Filters.ChannelBinding.L);
-                                mixBuffer[0] = tempBuf[0];
+                                mixBuffer[0] = filter.Process(mixBuffer[0], Models.Filters.ChannelBinding.L);
                             }
                             if ((filter.Channels & Models.Filters.ChannelBinding.R) != 0)
                             {
-                                float[] tempBuf = new[] { mixBuffer[1] };
-                                filter.Process(tempBuf, 0, 1, Models.Filters.ChannelBinding.R);
-                                mixBuffer[1] = tempBuf[0];
+                                mixBuffer[1] = filter.Process(mixBuffer[1], Models.Filters.ChannelBinding.R);
                             }
                         }
                     }

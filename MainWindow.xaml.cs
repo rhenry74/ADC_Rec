@@ -1331,10 +1331,11 @@ namespace ADC_Rec
             };
 
             var control = new Controls.Filters.FilterCardControl(filter);
+            _audioMixService.Filters.Add(filter);
             control.DeleteRequested += (s, ctrl) => 
             {
                 FiltersRack.Children.Remove(ctrl);
-                // Note: Need to remove from AudioMixService._filters too if we exposed that
+                _audioMixService.Filters.Remove(ctrl.Filter);
             };
             FiltersRack.Children.Add(control);
             FiltersBorder.Visibility = Visibility.Visible;

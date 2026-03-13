@@ -97,6 +97,24 @@ Serial RX → Parser.Feed() → packetQueue → DrainLoop() → ProcessPackets()
 
 ---
 
+## Filter Architecture
+
+### UI & Pipeline Processing
+The application implements a decoupled, type-safe architecture for filters:
+
+1.  **Pipeline Processing**:
+    -   Filters implement `IFilter`.
+    -   The `Process(float sample, ChannelBinding targetChannel)` method is called per-sample in the `AudioMixService` processing loop.
+    -   Filters maintain internal state (buffers) keyed by `ChannelBinding` to ensure correct audio processing when the same filter instance is applied to multiple channels.
+    -   The interface was simplified to operate on a per-sample basis for clarity and consistency, eliminating unnecessary buffer management at the interface level.
+
+2.  **Filter UI**:
+    -   Each filter has a corresponding `UserControl` (e.g., `PeakingEQControl`).
+    -   `FilterCardControl` acts as a host and uses `ParamPresenter` (a `ContentPresenter`) to inject the specific UI control based on the filter type using a simple type-check.
+    -   Controls use `DataBinding` to the filter instance's properties to ensure settings remain synchronized with the processing model.
+
+---
+
 ## Key Components
 
 ### Models

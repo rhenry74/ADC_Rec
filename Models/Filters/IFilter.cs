@@ -26,12 +26,17 @@ namespace ADC_Rec.Models.Filters
     public interface IFilter
     {
         Guid Id { get; }
-        string Name { get; }
+        string Name { get; set; }
         FilterType Type { get; }
         ChannelBinding Channels { get; set; }
         bool IsEnabled { get; set; }
         
-        // Audio processing - no allocation here
-        void Process(float[] buffer, int offset, int count, ChannelBinding targetChannel);
+        /// <summary>
+        /// Processes a single audio sample for a specific channel.
+        /// </summary>
+        /// <param name="sample">The input audio sample.</param>
+        /// <param name="targetChannel">The channel binding the sample belongs to, used to maintain internal state per channel.</param>
+        /// <returns>The processed audio sample.</returns>
+        float Process(float sample, ChannelBinding targetChannel);
     }
 }

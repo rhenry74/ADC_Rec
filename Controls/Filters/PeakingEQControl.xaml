@@ -1,0 +1,46 @@
+<UserControl
+    x:Class="ADC_Rec.Controls.Filters.PeakingEQControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:ADC_Rec.Controls.Filters"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    d:DesignHeight="100"
+    d:DesignWidth="300">
+    <StackPanel Spacing="8">
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Frequency (Hz):" />
+                <TextBlock Text="{x:Bind ViewModel.Frequency, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="20" Maximum="20000" Value="{x:Bind ViewModel.Frequency, Mode=TwoWay}" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Gain (dB):" />
+                <TextBlock Text="{x:Bind ViewModel.GainDb, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="-20" Maximum="20" Value="{x:Bind ViewModel.GainDb, Mode=TwoWay}" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Q:" />
+                <TextBlock Text="{x:Bind ViewModel.Q, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="0.1" Maximum="10" Value="{x:Bind ViewModel.Q, Mode=TwoWay}" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

@@ -15,10 +15,16 @@ namespace ADC_Rec.Controls.Filters
         {
             this.InitializeComponent();
             Filter = filter;
-            TitleBlock.Text = filter.Name;
+            TitleBox.Text = filter.Name;
+            TitleBox.TextChanged += (s, e) => { filter.Name = TitleBox.Text; };
             EnabledCheck.IsChecked = filter.IsEnabled;
             EnabledCheck.Checked += (s, e) => filter.IsEnabled = true;
             EnabledCheck.Unchecked += (s, e) => filter.IsEnabled = false;
+
+            if (filter is PeakingEQFilter peakingFilter)
+            {
+                ParamPresenter.Content = new PeakingEQControl(peakingFilter);
+            }
             
             // Build channel toggles
             foreach (ChannelBinding binding in Enum.GetValues(typeof(ChannelBinding)))

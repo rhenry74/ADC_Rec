@@ -9,11 +9,18 @@
     d:DesignWidth="300">
     <Border BorderBrush="Gray" BorderThickness="1" CornerRadius="4" Padding="8" Margin="0,0,0,8">
         <StackPanel>
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <ToggleButton x:Name="CollapseToggle" Content="▼" IsChecked="True" Click="CollapseToggle_Click" />
-                <TextBlock x:Name="TitleBlock" Text="Filter" VerticalAlignment="Center" Margin="8,0" FontWeight="Bold" />
-                <Button x:Name="DeleteButton" Content="Delete" Click="DeleteButton_Click" HorizontalAlignment="Right" />
-            </StackPanel>
+                <TextBox x:Name="TitleBox" Text="Filter" Grid.Column="1" VerticalAlignment="Center" Margin="8,0" FontWeight="Bold" />
+                <Button x:Name="DeleteButton" Grid.Column="2" Click="DeleteButton_Click" HorizontalAlignment="Right">
+                    <TextBlock Text="🗑️" />
+                </Button>
+            </Grid>
             <StackPanel x:Name="ContentPanel" Margin="0,8,0,0">
                 <CheckBox x:Name="EnabledCheck" Content="Enabled" IsChecked="True" />
                 <TextBlock Text="Channels:" Margin="0,4,0,0" />
