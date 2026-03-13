@@ -41,6 +41,10 @@ namespace ADC_Rec.Controls.Filters
             {
                 ParamPresenter.Content = new ReverbControl(reverbFilter);
             }
+            else if (filter is DelayFilter delayFilter)
+            {
+                ParamPresenter.Content = new DelayControl(delayFilter);
+            }
             
             // Build channel toggles
             foreach (ChannelBinding binding in Enum.GetValues(typeof(ChannelBinding)))

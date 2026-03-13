@@ -1321,7 +1321,8 @@ namespace ADC_Rec
                 (Models.Filters.FilterType.HighShelf, "High Shelf"),
                 (Models.Filters.FilterType.Compressor, "Compressor"),
                 (Models.Filters.FilterType.NoiseSuppression, "Noise Suppression"),
-                (Models.Filters.FilterType.Reverb, "Reverb")
+                (Models.Filters.FilterType.Reverb, "Reverb"),
+                (Models.Filters.FilterType.Delay, "Delay")
             };
 
             foreach (var type in types)
@@ -1343,6 +1344,7 @@ namespace ADC_Rec
                 Models.Filters.FilterType.Compressor => new Models.Filters.CompressorFilter(),
                 Models.Filters.FilterType.NoiseSuppression => new Models.Filters.NoiseSuppressionFilter(),
                 Models.Filters.FilterType.Reverb => new Models.Filters.ReverbFilter(),
+                Models.Filters.FilterType.Delay => new Models.Filters.DelayFilter(),
                 _ => throw new ArgumentOutOfRangeException()
             };
 

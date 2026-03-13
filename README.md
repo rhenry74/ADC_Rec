@@ -113,6 +113,53 @@ The application implements a decoupled, type-safe architecture for filters:
     -   `FilterCardControl` acts as a host and uses `ParamPresenter` (a `ContentPresenter`) to inject the specific UI control based on the filter type using a simple type-check.
     -   Controls use `DataBinding` to the filter instance's properties to ensure settings remain synchronized with the processing model.
 
+### Available Filters
+
+-   **Compressor**:
+    -   Reduces the dynamic range of audio signals by lowering levels that exceed a specified threshold.
+    -   *Parameters*:
+        -   `ThresholdDb`: The level above which compression is applied.
+        -   `Ratio`: The amount of reduction (e.g., 4:1 means output increases by 1dB for every 4dB of input increase).
+        -   `AttackMs`: Time taken for the filter to reach full gain reduction when signal exceeds threshold.
+        -   `ReleaseMs`: Time taken for the filter to return to unity gain after signal drops below threshold.
+        -   `MakeupGainDb`: Output gain adjustment to compensate for level loss.
+
+-   **Noise Suppression**:
+    -   Reduces low-level background noise by attenuating signals that fall below a certain threshold (Noise Gate).
+    -   *Parameters*:
+        -   `ThresholdDb`: The level below which the gate closes.
+        -   `ReductionDb`: The amount of gain reduction applied when the signal is below the threshold.
+        -   `AttackMs`: Time taken for the gate to open.
+        -   `ReleaseMs`: Time taken for the gate to close.
+
+-   **Peaking EQ**:
+    -   A parametric equalizer filter that boosts or cuts a specific frequency range.
+    -   *Parameters*:
+        -   `Frequency`: The center frequency to be boosted or cut.
+        -   `GainDb`: The boost or cut amount in decibels.
+        -   `Q`: The quality factor; higher values mean a narrower frequency band is affected.
+
+-   **Shelf (Low/High)**:
+    -   Provides a boost or cut above (High Shelf) or below (Low Shelf) a cutoff frequency.
+    -   *Parameters*:
+        -   `Frequency`: The cutoff frequency.
+        -   `GainDb`: The boost or cut amount in decibels.
+        -   `Slope`: The steepness of the shelf transition.
+
+-   **Reverb**:
+    -   Simulates acoustic reflections to create a sense of space.
+    -   *Parameters*:
+        -   `RoomSize`: Affects the feedback intensity of the internal delay lines.
+        -   `Damping`: Controls how quickly high frequencies decay.
+        -   `WetLevel`: The ratio of processed (reverb) signal to input signal.
+
+-   **Delay**:
+    -   Produces an echo effect by repeating the audio signal after a specified time.
+    -   *Parameters*:
+        -   `DelayTimeMs`: The time interval between the original signal and the echo.
+        -   `Feedback`: The amount of output signal fed back into the input (0.1 increments).
+        -   `WetLevel`: The ratio of processed (delay) signal to input signal (0.1 increments).
+
 ---
 
 ## Key Components
