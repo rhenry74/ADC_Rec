@@ -322,49 +322,63 @@ namespace ADC_Rec
             catch { }
         }
 
+        private bool _isProcessing = false; // to prevent reentrancy in ProcessPendingPackets
         private void ProcessPendingPackets()
         {
-            // UI refresh only; background drain feeds the plot manager at full speed
-            if (!_running && !_replaying) return;
-
-            // If UI is disabled, skip all UI rendering but keep the timer running for drain to continue
-            if (!_uiEnabled) return;
-
-            // trigger single UI update (fill display buffers then draw) and flush logs occasionally
-            _ = DispatcherQueue.TryEnqueue(() =>
+            if (_isProcessing)
             {
-                bool anyDrawn = false;
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                return; // prevent reentrancy if processing takes longer than timer interval
+            }
+            try
+            {
+                _isProcessing = true;
+
+                // UI refresh only; background drain feeds the plot manager at full speed
+                if (!_running && !_replaying) return;
+
+                // If UI is disabled, skip all UI rendering but keep the timer running for drain to continue
+                if (!_uiEnabled) return;
+
+                // trigger single UI update (fill display buffers then draw) and flush logs occasionally
+                _ = DispatcherQueue.TryEnqueue(() =>
                 {
-                    int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
-                    DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
-                    if (n > 0) anyDrawn = true;
-                }
+                    bool anyDrawn = false;
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    {
+                        int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                        var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                        // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
+                        DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
+                        if (n > 0) anyDrawn = true;
+                    }
 
-                // Update per-channel latest raw sample display (always show most recent sample as hex)
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
-                {
-                    var tmpRaw = new uint[1];
-                    int a = _plotManager.FillChannelRawSnapshot(ch, tmpRaw, 1);
-                    string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({ConvertRawToUnsigned(tmpRaw[0])})" : "<no data>";
-                    if (ch == 0) HoverText0.Text = txt;
-                    else if (ch == 1) HoverText1.Text = txt;
-                    else if (ch == 2) HoverText2.Text = txt;
-                    else HoverText3.Text = txt;
-                }
+                    // Update per-channel latest raw sample display (always show most recent sample as hex)
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    {
+                        var tmpRaw = new uint[1];
+                        int a = _plotManager.FillChannelRawSnapshot(ch, tmpRaw, 1);
+                        string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({ConvertRawToUnsigned(tmpRaw[0])})" : "<no data>";
+                        if (ch == 0) HoverText0.Text = txt;
+                        else if (ch == 1) HoverText1.Text = txt;
+                        else if (ch == 2) HoverText2.Text = txt;
+                        else HoverText3.Text = txt;
+                    }
 
-                if (!anyDrawn)
-                {
-                    // Avoid spamming logs. Update on-screen diagnostics so you can inspect counts without flooding the log.
-                    UpdateBytesUi();
-                }
+                    if (!anyDrawn)
+                    {
+                        // Avoid spamming logs. Update on-screen diagnostics so you can inspect counts without flooding the log.
+                        UpdateBytesUi();
+                    }
 
-                UpdateMeterUi();
+                    UpdateMeterUi();
 
-                if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
-            });
+                    if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
+                });
+            }
+            finally
+            {
+                _isProcessing = false;
+            }
         }
 
         private void UpdateMeterUi()
@@ -1306,7 +1320,8 @@ namespace ADC_Rec
                 (Models.Filters.FilterType.LowShelf, "Low Shelf"),
                 (Models.Filters.FilterType.HighShelf, "High Shelf"),
                 (Models.Filters.FilterType.Compressor, "Compressor"),
-                (Models.Filters.FilterType.NoiseSuppression, "Noise Suppression")
+                (Models.Filters.FilterType.NoiseSuppression, "Noise Suppression"),
+                (Models.Filters.FilterType.Reverb, "Reverb")
             };
 
             foreach (var type in types)
@@ -1327,6 +1342,7 @@ namespace ADC_Rec
                 Models.Filters.FilterType.HighShelf => new Models.Filters.ShelfFilter(false),
                 Models.Filters.FilterType.Compressor => new Models.Filters.CompressorFilter(),
                 Models.Filters.FilterType.NoiseSuppression => new Models.Filters.NoiseSuppressionFilter(),
+                Models.Filters.FilterType.Reverb => new Models.Filters.ReverbFilter(),
                 _ => throw new ArgumentOutOfRangeException()
             };
 

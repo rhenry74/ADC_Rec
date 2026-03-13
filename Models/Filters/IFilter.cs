@@ -8,7 +8,8 @@ namespace ADC_Rec.Models.Filters
         LowShelf,
         HighShelf,
         Compressor,
-        NoiseSuppression
+        NoiseSuppression,
+        Reverb
     }
 
     [Flags]

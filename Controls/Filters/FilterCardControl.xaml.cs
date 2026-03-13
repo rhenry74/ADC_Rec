@@ -18,12 +18,28 @@ namespace ADC_Rec.Controls.Filters
             TitleBox.Text = filter.Name;
             TitleBox.TextChanged += (s, e) => { filter.Name = TitleBox.Text; };
             EnabledCheck.IsChecked = filter.IsEnabled;
-            EnabledCheck.Checked += (s, e) => filter.IsEnabled = true;
-            EnabledCheck.Unchecked += (s, e) => filter.IsEnabled = false;
+            EnabledCheck.Content = "✓";
+            EnabledCheck.Opacity = filter.IsEnabled ? 1.0 : 0.3;
 
             if (filter is PeakingEQFilter peakingFilter)
             {
                 ParamPresenter.Content = new PeakingEQControl(peakingFilter);
+            }
+            else if (filter is ShelfFilter shelfFilter)
+            {
+                ParamPresenter.Content = new ShelfControl(shelfFilter);
+            }
+            else if (filter is NoiseSuppressionFilter nsFilter)
+            {
+                ParamPresenter.Content = new NoiseSuppressionControl(nsFilter);
+            }
+            else if (filter is CompressorFilter compFilter)
+            {
+                ParamPresenter.Content = new CompressorControl(compFilter);
+            }
+            else if (filter is ReverbFilter reverbFilter)
+            {
+                ParamPresenter.Content = new ReverbControl(reverbFilter);
             }
             
             // Build channel toggles
@@ -41,6 +57,12 @@ namespace ADC_Rec.Controls.Filters
                 tb.Unchecked += (s, e) => { filter.Channels &= ~binding; };
                 ChannelPanel.Children.Add(tb);
             }
+        }
+
+        private void EnabledCheck_Click(object sender, RoutedEventArgs e)
+        {
+            Filter.IsEnabled = (EnabledCheck.IsChecked == true);
+            EnabledCheck.Opacity = Filter.IsEnabled ? 1.0 : 0.3;
         }
 
         private void CollapseToggle_Click(object sender, RoutedEventArgs e)

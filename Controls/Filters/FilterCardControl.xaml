@@ -12,17 +12,18 @@
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <ToggleButton x:Name="CollapseToggle" Content="▼" IsChecked="True" Click="CollapseToggle_Click" />
-                <TextBox x:Name="TitleBox" Text="Filter" Grid.Column="1" VerticalAlignment="Center" Margin="8,0" FontWeight="Bold" />
-                <Button x:Name="DeleteButton" Grid.Column="2" Click="DeleteButton_Click" HorizontalAlignment="Right">
+                <ToggleButton x:Name="EnabledCheck" Content="✓" Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center" Padding="8,2" Click="EnabledCheck_Click" />
+                <TextBox x:Name="TitleBox" Grid.Column="2" VerticalAlignment="Center" Margin="8,0" FontSize="12" />
+                <Button x:Name="DeleteButton" Grid.Column="3" Click="DeleteButton_Click" HorizontalAlignment="Right">
                     <TextBlock Text="🗑️" />
                 </Button>
             </Grid>
             <StackPanel x:Name="ContentPanel" Margin="0,8,0,0">
-                <CheckBox x:Name="EnabledCheck" Content="Enabled" IsChecked="True" />
                 <TextBlock Text="Channels:" Margin="0,4,0,0" />
                 <StackPanel x:Name="ChannelPanel" Orientation="Horizontal" />
                 <ContentPresenter x:Name="ParamPresenter" Margin="0,8,0,0" />
