@@ -11,6 +11,7 @@ namespace ADC_Rec.Controls.Filters
         {
             ViewModel = filter;
             this.InitializeComponent();
+            filter.PropertyChanged += (s, e) => { /* refresh logic if needed */ };
         }
     }
 }

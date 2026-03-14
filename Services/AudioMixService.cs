@@ -89,6 +89,13 @@ namespace ADC_Rec.Services
             lock (_lock) { _channelPans[ch] = pan; }
         }
 
+        public float[] GetChannelPansSnapshot()
+        {
+            var pans = new float[Packet.NumChannels];
+            lock (_lock) { Array.Copy(_channelPans, pans, Packet.NumChannels); }
+            return pans;
+        }
+
         public void SetDcBlockEnabled(bool enabled)
         {
             lock (_lock) { _dcBlockEnabled = enabled; }

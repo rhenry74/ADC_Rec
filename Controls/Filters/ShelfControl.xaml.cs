@@ -9,8 +9,8 @@ namespace ADC_Rec.Controls.Filters
 
         public ShelfControl(ShelfFilter filter)
         {
-            this.InitializeComponent();
             ViewModel = filter;
+            this.InitializeComponent();
         }
     }
 }

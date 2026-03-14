@@ -392,10 +392,10 @@ namespace ADC_Rec
                 UpdateMeterRect(_meterRightRects[i], right[i], i);
             }
 
-            if (PeakHoldLeftBar != null) PeakHoldLeftBar.Value = _audioMixService.PeakHoldLeft;
-            if (PeakHoldRightBar != null) PeakHoldRightBar.Value = _audioMixService.PeakHoldRight;
-            if (AvgHoldLeftBar != null) AvgHoldLeftBar.Value = _audioMixService.AvgHoldLeft;
-            if (AvgHoldRightBar != null) AvgHoldRightBar.Value = _audioMixService.AvgHoldRight;
+            //if (PeakHoldLeftBar != null) PeakHoldLeftBar.Value = _audioMixService.PeakHoldLeft;
+            //if (PeakHoldRightBar != null) PeakHoldRightBar.Value = _audioMixService.PeakHoldRight;
+            //if (AvgHoldLeftBar != null) AvgHoldLeftBar.Value = _audioMixService.AvgHoldLeft;
+            //if (AvgHoldRightBar != null) AvgHoldRightBar.Value = _audioMixService.AvgHoldRight;
         }
 
         private void UpdateMeterRect(Rectangle rect, float lit, int index)
@@ -1106,6 +1106,47 @@ namespace ADC_Rec
             }
         }
 
+        private async void SaveConfigButton_Click(object sender, RoutedEventArgs e)
+        {
+            var picker = new Windows.Storage.Pickers.FileSavePicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeChoices.Add("JSON", new List<string> { ".json" });
+            picker.SuggestedFileName = "config";
+            var file = await picker.PickSaveFileAsync();
+            if (file != null)
+            {
+                Services.ConfigService.SaveConfig(file.Path, _audioMixService);
+                AddLog($"Config saved to {file.Path}");
+            }
+        }
+
+        private async void LoadConfigButton_Click(object sender, RoutedEventArgs e)
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeFilter.Add(".json");
+            var file = await picker.PickSingleFileAsync();
+            if (file != null)
+            {
+                Services.ConfigService.LoadConfig(file.Path, _audioMixService);
+                
+                FiltersRack.Children.Clear();
+                foreach (var filter in _audioMixService.Filters)
+                {
+                    var control = new Controls.Filters.FilterCardControl(filter);
+                    control.DeleteRequested += (s, ctrl) => 
+                    {
+                        FiltersRack.Children.Remove(ctrl);
+                        _audioMixService.Filters.Remove(ctrl.Filter);
+                    };
+                    FiltersRack.Children.Add(control);
+                }
+                AddLog($"Config loaded from {file.Path}");
+            }
+        }
+
         private CancellationTokenSource? _replayCts;
 
         private async void ReplayButton_Click(object sender, RoutedEventArgs e)
@@ -1356,7 +1397,6 @@ namespace ADC_Rec
                 _audioMixService.Filters.Remove(ctrl.Filter);
             };
             FiltersRack.Children.Add(control);
-            FiltersBorder.Visibility = Visibility.Visible;
         }
     }
 }
