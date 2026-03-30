@@ -123,12 +123,13 @@ namespace ADC_Rec.Services
             // Use SampleProvider to work with floats directly without manual byte conversion
             _playbackBuffer = new BufferedWaveProvider(monitorFormat)
             {
-                BufferLength = (InputSampleRate * OutputChannels * sizeof(float)) / 3,    
+                BufferLength = (InputSampleRate * OutputChannels * sizeof(float)) / 5,    
                 DiscardOnBufferOverflow = true
             };
 
             _waveOut = new WaveOutEvent();
-            _waveOut.Init(_playbackBuffer);
+            //_waveOut.DesiredLatency = 250;
+            _waveOut.Init(_playbackBuffer);            
             _waveOut.Play();
             _playbackStarted = true;
         }

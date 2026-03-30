@@ -45,6 +45,10 @@ namespace ADC_Rec.Controls.Filters
             {
                 ParamPresenter.Content = new DelayControl(delayFilter);
             }
+            else if (filter is PhaseFilter phaseFilter)
+            {
+                ParamPresenter.Content = new PhaseControl(phaseFilter);
+            }
             
             // Build channel toggles
             foreach (ChannelBinding binding in Enum.GetValues(typeof(ChannelBinding)))

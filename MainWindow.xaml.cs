@@ -43,7 +43,7 @@ namespace ADC_Rec
         private int _sampleRate = 44100; // default sample rate
         private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
         private const int MaxPacketBatchPerTick = 64;
-        private const int MaxPacketQueue = 4096; // if exceeded, drop oldest packets to keep memory bounded
+        private const int MaxPacketQueue = 512; // if exceeded, drop oldest packets to keep memory bounded
         private int _lastLogFlushTick = Environment.TickCount;
         private const int LogFlushMs = 500;
 
@@ -63,7 +63,7 @@ namespace ADC_Rec
         private int _lastDrainTick = 0;
         private bool _drainStartedLogged = false;
         private bool _drainIdleLogged = false;
-        private const int DrainBatchSize = 256;
+        private const int DrainBatchSize = 8;
         private const int DrainIdleMs = 1;
         private const int DrainHighWaterMark = MaxPacketQueue;
         private const int DrainTargetQueue = MaxPacketQueue / 2;
@@ -103,10 +103,10 @@ namespace ADC_Rec
         private readonly Line[] _channelBaselines = new Line[Models.Packet.NumChannels];
         private readonly Ellipse[] _channelDots = new Ellipse[Models.Packet.NumChannels];
         private readonly PointCollection[] _channelPoints = new PointCollection[Models.Packet.NumChannels];
-        
+
         // Track if drawing objects have been initialized
         private bool _drawingObjectsInitialized = false;
-        
+
         // Track log text length to avoid rebuilding entire string
         private int _logTextLength = 0;
         private const int MaxLogChars = 200000;
@@ -218,7 +218,8 @@ namespace ADC_Rec
 
         private void ForceRedraw()
         {
-            _ = DispatcherQueue.TryEnqueue(() => {
+            _ = DispatcherQueue.TryEnqueue(() =>
+            {
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
@@ -279,7 +280,7 @@ namespace ADC_Rec
             _packetQueue.Enqueue(pkt);
             System.Threading.Interlocked.Increment(ref _pendingPacketCount);
 
-                    // Track parsed bytes per channel (each sample is 2 bytes)
+            // Track parsed bytes per channel (each sample is 2 bytes)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
             {
                 System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 2);
@@ -596,25 +597,25 @@ namespace ADC_Rec
                     _drainIdleLogged = false;
                     System.Threading.Interlocked.Increment(ref _drainLoopIterations);
                     int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
-                    if (!_recording && queueCount >= DrainHighWaterMark)
-                    {
-                        int toDrop = Math.Max(0, queueCount - DrainTargetQueue);
-                        int dropped = 0;
-                        for (int i = 0; i < toDrop; i++)
-                        {
-                            if (_packetQueue.TryDequeue(out _))
-                            {
-                                System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
-                                dropped++;
-                            }
-                            else break;
-                        }
-                        if (dropped > 0)
-                        {
-                            System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
-                            System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
-                        }
-                    }
+                    //if (!_recording && queueCount >= DrainHighWaterMark)
+                    //{
+                    //    int toDrop = Math.Max(0, queueCount - DrainTargetQueue);
+                    //    int dropped = 0;
+                    //    for (int i = 0; i < toDrop; i++)
+                    //    {
+                    //        if (_packetQueue.TryDequeue(out _))
+                    //        {
+                    //            System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                    //            dropped++;
+                    //        }
+                    //        else break;
+                    //    }
+                    //    if (dropped > 0)
+                    //    {
+                    //        System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
+                    //        System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
+                    //    }
+                    //}
                     var batch = new List<Models.Packet>(DrainBatchSize);
                     for (int i = 0; i < DrainBatchSize; i++)
                     {
@@ -627,17 +628,17 @@ namespace ADC_Rec
                     }
                     _lastDrainBatchCount = batch.Count;
                     _lastDrainTick = Environment.TickCount;
-            if (batch.Count == 0)
-            {
-                await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
-                continue;
-            }
+                    if (batch.Count == 0)
+                    {
+                        //await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
+                        continue;
+                    }
 
-            // Process samples in the DrainLoop before sending to PlotManager and AudioMixService
-            _audioMixService.ProcessAndPlotPackets(batch, _plotManager);
+                    // Process samples in the DrainLoop before sending to PlotManager and AudioMixService
+                    _audioMixService.ProcessAndPlotPackets(batch, _plotManager);
 
-            // Track processed packets for diagnostics
-            System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
+                    // Track processed packets for diagnostics
+                    System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
 
                     // If recording, write raw packets to disk (header + payload)
                     if (_recording)
@@ -711,7 +712,7 @@ namespace ADC_Rec
                 if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
 
                 float min, max;
-                
+
                 // Processed samples are floats in range [-1, 1], centered around 0
                 // Fit-to-data logic for [-1, 1] data:
                 if (_fitToData)
@@ -738,7 +739,7 @@ namespace ADC_Rec
                     max = 1.0f;
                 }
                 float range = max - min;
-                if (range <= 0f) range = 1f; 
+                if (range <= 0f) range = 1f;
 
                 int n = length;
                 int pixelWidth = (int)w;
@@ -969,6 +970,7 @@ namespace ADC_Rec
 
         private void UpdateBytesUi()
         {
+            
             try
             {
                 long parsedPkts = _parser?.ParsedPacketCount ?? 0;
@@ -988,7 +990,7 @@ namespace ADC_Rec
                 long dropped = System.Threading.Interlocked.Add(ref _droppedPacketCount, 0);
                 long processed = System.Threading.Interlocked.Add(ref _processedPacketCount, 0);
                 int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
-                    // collect per-channel snapshot counts and maximums for diagnostics
+                // collect per-channel snapshot counts and maximums for diagnostics
                 var sbDiag = new System.Text.StringBuilder();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
@@ -1131,12 +1133,12 @@ namespace ADC_Rec
             if (file != null)
             {
                 Services.ConfigService.LoadConfig(file.Path, _audioMixService);
-                
+
                 FiltersRack.Children.Clear();
                 foreach (var filter in _audioMixService.Filters)
                 {
                     var control = new Controls.Filters.FilterCardControl(filter);
-                    control.DeleteRequested += (s, ctrl) => 
+                    control.DeleteRequested += (s, ctrl) =>
                     {
                         FiltersRack.Children.Remove(ctrl);
                         _audioMixService.Filters.Remove(ctrl.Filter);
@@ -1193,7 +1195,7 @@ namespace ADC_Rec
 
                 string path = file.Path;
                 AddLog($"Replaying {path}");
-                
+
                 // Create cancellation token for this replay
                 _replayCts = new CancellationTokenSource();
                 var token = _replayCts.Token;
@@ -1213,7 +1215,7 @@ namespace ADC_Rec
                         int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 2;
                         using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
                         var buf = new byte[pktLen];
-                        
+
                         // Calculate packets per second for real-time pacing
                         // Each packet has BufferLen (8) samples per channel, 4 channels = 32 raw samples
                         // After mixing to stereo: BufferLen (8) samples × 2 channels = 16 stereo samples
@@ -1221,14 +1223,14 @@ namespace ADC_Rec
                         int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * 2);
                         // Use batch size that gives us reasonable delay intervals (e.g., 50ms worth)
                         int batchSize = Math.Max(1, packetsPerSecond / 20); // 1/20 second worth = ~138 packets
-                        
+
                         while (!token.IsCancellationRequested)
                         {
                             // Read a batch of packets
                             for (int i = 0; i < batchSize; i++)
                             {
                                 int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
-                                if (read < pktLen) 
+                                if (read < pktLen)
                                 {
                                     // Final few packets - process them and exit
                                     if (read > 0) _parser.Feed(buf);
@@ -1236,10 +1238,10 @@ namespace ADC_Rec
                                 }
                                 _parser.Feed(buf);
                             }
-                            
+
                             // Check if we've reached end of file
                             if (fs.Position >= fs.Length) break;
-                            
+
                             // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
                             // Use _rateRatioSmoothed to match what's displayed on screen
                             int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
@@ -1341,7 +1343,8 @@ namespace ADC_Rec
             StopUiTimer();
             StopCountersTimer();
             // stop recording if active
-            if (_recording) {
+            if (_recording)
+            {
                 lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
                 _recording = false;
                 _audioMixService.StopWavWrite();
@@ -1356,14 +1359,15 @@ namespace ADC_Rec
         private void AddFilterButton_Click(object sender, RoutedEventArgs e)
         {
             var menu = new MenuFlyout();
-            var types = new[] { 
+            var types = new[] {
                 (Models.Filters.FilterType.PeakingEQ, "Peaking EQ"),
                 (Models.Filters.FilterType.LowShelf, "Low Shelf"),
                 (Models.Filters.FilterType.HighShelf, "High Shelf"),
                 (Models.Filters.FilterType.Compressor, "Compressor"),
                 (Models.Filters.FilterType.NoiseSuppression, "Noise Suppression"),
                 (Models.Filters.FilterType.Reverb, "Reverb"),
-                (Models.Filters.FilterType.Delay, "Delay")
+                (Models.Filters.FilterType.Delay, "Delay"),
+                (Models.Filters.FilterType.Phase, "Phase")
             };
 
             foreach (var type in types)
@@ -1386,12 +1390,13 @@ namespace ADC_Rec
                 Models.Filters.FilterType.NoiseSuppression => new Models.Filters.NoiseSuppressionFilter(),
                 Models.Filters.FilterType.Reverb => new Models.Filters.ReverbFilter(),
                 Models.Filters.FilterType.Delay => new Models.Filters.DelayFilter(),
+                Models.Filters.FilterType.Phase => new Models.Filters.PhaseFilter(),
                 _ => throw new ArgumentOutOfRangeException()
             };
 
             var control = new Controls.Filters.FilterCardControl(filter);
             _audioMixService.Filters.Add(filter);
-            control.DeleteRequested += (s, ctrl) => 
+            control.DeleteRequested += (s, ctrl) =>
             {
                 FiltersRack.Children.Remove(ctrl);
                 _audioMixService.Filters.Remove(ctrl.Filter);

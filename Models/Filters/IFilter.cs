@@ -10,7 +10,8 @@ namespace ADC_Rec.Models.Filters
         Compressor,
         NoiseSuppression,
         Reverb,
-        Delay
+        Delay,
+        Phase
     }
 
     [Flags]
