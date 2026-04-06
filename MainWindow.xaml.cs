@@ -1208,7 +1208,7 @@ namespace ADC_Rec
                     _audioMixService?.StartPlayback();
                 }
                 _replaying = true;
-                System.Threading.Tasks.Task.Run(async () =>
+                _ = System.Threading.Tasks.Task.Run(async () =>
                 {
                     try
                     {
@@ -1220,12 +1220,13 @@ namespace ADC_Rec
                         // Each packet has BufferLen (8) samples per channel, 4 channels = 32 raw samples
                         // After mixing to stereo: BufferLen (8) samples × 2 channels = 16 stereo samples
                         // At 44100 Hz: 44100 / 16 = 2756 packets per second for 1 second of audio
-                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * 2);
+                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * Models.Packet.NumChannels);
                         // Use batch size that gives us reasonable delay intervals (e.g., 50ms worth)
-                        int batchSize = Math.Max(1, packetsPerSecond / 20); // 1/20 second worth = ~138 packets
+                        int batchSize = (int)Math.Max(1, packetsPerSecond * 0.2);
 
                         while (!token.IsCancellationRequested)
                         {
+                            var now = DateTime.Now;
                             // Read a batch of packets
                             for (int i = 0; i < batchSize; i++)
                             {
@@ -1244,8 +1245,11 @@ namespace ADC_Rec
 
                             // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
                             // Use _rateRatioSmoothed to match what's displayed on screen
-                            int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
-                            await System.Threading.Tasks.Task.Delay(delayMs).ConfigureAwait(false);
+                            //int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
+                            //we need to feed batchSize every 20ms to match the processing in the drain loop, so calculate delay based on actual batch size and packets per second
+                            var howLong = DateTime.Now.Subtract(now).TotalMilliseconds;
+                            var delayMs = howLong > 40 ? 14: 40 - howLong;
+                            await System.Threading.Tasks.Task.Delay((int)delayMs).ConfigureAwait(false);
                         }
                         _logQueue.Enqueue($"Replay finished: {path}");
                     }
