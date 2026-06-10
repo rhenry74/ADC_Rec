@@ -112,8 +112,17 @@ namespace ADC_Rec
         private const int MaxLogChars = 200000;
         private const int TrimLogChars = 50000; // Trim this many chars when limit reached
 
-        // UI enable/disable for maximum performance mode
-        private bool _uiEnabled = true;
+        // Refresh rate control (replaces UI enabled/disabled)
+        private enum RefreshRate
+        {
+            Hz20 = 50,    // 20Hz (50ms)
+            Hz5 = 200,     // 5Hz (200ms)
+            Hz1 = 1000,    // 1Hz (1000ms)
+            Disabled = 0   // 0Hz (no updates)
+        }
+
+        private RefreshRate _currentRefreshRate = RefreshRate.Hz20;
+        private int _uiTimerInterval = 50; // Default to 20Hz
 
         public MainWindow()
         {
@@ -163,12 +172,13 @@ namespace ADC_Rec
                 VerboseCheckbox.Unchecked += (s, e) => { _parser.Verbose = false; _logQueue.Enqueue("Verbose OFF"); };
             }
 
-            // UI enabled checkbox hookup (if exists) - disables UI for max performance
-            if (UiEnabledCheck != null)
+            // Refresh rate radio buttons hookup
+            if (Refresh20Hz != null && Refresh5Hz != null && Refresh1Hz != null && Refresh0Hz != null)
             {
-                UiEnabledCheck.IsChecked = _uiEnabled;
-                UiEnabledCheck.Checked += (s, e) => { _uiEnabled = true; _logQueue.Enqueue("UI: ON"); };
-                UiEnabledCheck.Unchecked += (s, e) => { _uiEnabled = false; _logQueue.Enqueue("UI: OFF (max performance)"); };
+                Refresh20Hz.Checked += RefreshRate_Checked;
+                Refresh5Hz.Checked += RefreshRate_Checked;
+                Refresh1Hz.Checked += RefreshRate_Checked;
+                Refresh0Hz.Checked += RefreshRate_Checked;
             }
 
             // Show hover/last-value labels all the time (initialize)
@@ -337,8 +347,8 @@ namespace ADC_Rec
                 // UI refresh only; background drain feeds the plot manager at full speed
                 if (!_running && !_replaying) return;
 
-                // If UI is disabled, skip all UI rendering but keep the timer running for drain to continue
-                if (!_uiEnabled) return;
+                // If UI refresh is disabled, skip all UI rendering but keep the timer running for drain to continue
+                if (_currentRefreshRate == RefreshRate.Disabled) return;
 
                 // trigger single UI update (fill display buffers then draw) and flush logs occasionally
                 _ = DispatcherQueue.TryEnqueue(() =>
@@ -513,7 +523,45 @@ namespace ADC_Rec
         private void StartUiTimer()
         {
             if (_uiTimer != null) return; // already running
-            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 50); // ~20Hz to reduce UI load
+            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, _uiTimerInterval);
+        }
+
+        private void RefreshRate_Checked(object sender, RoutedEventArgs e)
+        {
+            var radioButton = sender as RadioButton;
+            if (radioButton == null) return;
+
+            if (radioButton == Refresh20Hz)
+            {
+                _currentRefreshRate = RefreshRate.Hz20;
+                _uiTimerInterval = (int)RefreshRate.Hz20;
+                _logQueue.Enqueue("Refresh rate: 20Hz (smooth)");
+            }
+            else if (radioButton == Refresh5Hz)
+            {
+                _currentRefreshRate = RefreshRate.Hz5;
+                _uiTimerInterval = (int)RefreshRate.Hz5;
+                _logQueue.Enqueue("Refresh rate: 5Hz (balanced)");
+            }
+            else if (radioButton == Refresh1Hz)
+            {
+                _currentRefreshRate = RefreshRate.Hz1;
+                _uiTimerInterval = (int)RefreshRate.Hz1;
+                _logQueue.Enqueue("Refresh rate: 1Hz (economy)");
+            }
+            else if (radioButton == Refresh0Hz)
+            {
+                _currentRefreshRate = RefreshRate.Disabled;
+                _uiTimerInterval = (int)RefreshRate.Disabled;
+                _logQueue.Enqueue("Refresh rate: Disabled (max performance)");
+            }
+
+            // Restart timer with new interval if it's running
+            if (_uiTimer != null)
+            {
+                StopUiTimer();
+                StartUiTimer();
+            }
         }
 
         private void StopUiTimer()

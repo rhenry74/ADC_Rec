@@ -60,7 +60,15 @@
                 <Button x:Name="SaveConfigButton" Content="Save Config" Click="SaveConfigButton_Click" />
                 <Button x:Name="LoadConfigButton" Content="Load Config" Click="LoadConfigButton_Click" />
             </StackPanel>
-            <CheckBox x:Name="UiEnabledCheck" Content="UI enabled" IsChecked="True" Margin="0,8,0,0" />
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0" Spacing="4">
+                <TextBlock Text="Refresh:" VerticalAlignment="Center" FontWeight="SemiBold" Width="60" FontSize="12"/>
+                <RadioButton x:Name="Refresh20Hz" Content="20Hz" IsChecked="True" GroupName="RefreshRate" Checked="RefreshRate_Checked" Margin="0,0,1,0" FontSize="12" Padding="4,2,4,2"/>
+                <RadioButton x:Name="Refresh5Hz" Content="5Hz" GroupName="RefreshRate" Checked="RefreshRate_Checked" Margin="0,0,1,0" FontSize="12" Padding="4,2,4,2"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="60,2,0,0" Spacing="4">
+                <RadioButton x:Name="Refresh1Hz" Content="1Hz" GroupName="RefreshRate" Checked="RefreshRate_Checked" Margin="0,0,1,0" FontSize="12" Padding="4,2,4,2"/>
+                <RadioButton x:Name="Refresh0Hz" Content="Off" GroupName="RefreshRate" Checked="RefreshRate_Checked" FontSize="12" Padding="4,2,4,2"/>
+            </StackPanel>
 
             <TextBlock Text="Logs:" FontWeight="Bold" Margin="0,8,0,0" />
             <StackPanel Orientation="Horizontal" Spacing="8">
