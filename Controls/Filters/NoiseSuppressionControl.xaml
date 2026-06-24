@@ -1,0 +1,57 @@
+<UserControl
+    x:Class="ADC_Rec.Controls.Filters.NoiseSuppressionControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:ADC_Rec.Controls.Filters"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    d:DesignHeight="100"
+    d:DesignWidth="300">
+    <StackPanel Spacing="8">
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Threshold (dB):" />
+                <TextBlock Text="{x:Bind ViewModel.ThresholdDb, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="-100" Maximum="0" Value="{x:Bind ViewModel.ThresholdDb, Mode=TwoWay}" SmallChange="1" StepFrequency="1" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Reduction (dB):" />
+                <TextBlock Text="{x:Bind ViewModel.ReductionDb, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="0" Maximum="60" Value="{x:Bind ViewModel.ReductionDb, Mode=TwoWay}" SmallChange="1" StepFrequency="1" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Attack (ms):" />
+                <TextBlock Text="{x:Bind ViewModel.AttackMs, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="1" Maximum="100" Value="{x:Bind ViewModel.AttackMs, Mode=TwoWay}" SmallChange="1" StepFrequency="1" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Release (ms):" />
+                <TextBlock Text="{x:Bind ViewModel.ReleaseMs, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="10" Maximum="500" Value="{x:Bind ViewModel.ReleaseMs, Mode=TwoWay}" SmallChange="10" StepFrequency="10" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

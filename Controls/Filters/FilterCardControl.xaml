@@ -1,0 +1,33 @@
+<UserControl
+    x:Class="ADC_Rec.Controls.Filters.FilterCardControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    d:DesignHeight="100"
+    d:DesignWidth="300">
+    <Border BorderBrush="Gray" BorderThickness="1" CornerRadius="4" Padding="8" Margin="0,0,0,8">
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ToggleButton x:Name="CollapseToggle" Content="▼" IsChecked="True" Click="CollapseToggle_Click" />
+                <ToggleButton x:Name="EnabledCheck" Content="✓" Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center" Padding="8,2" Click="EnabledCheck_Click" />
+                <TextBox x:Name="TitleBox" Grid.Column="2" VerticalAlignment="Center" Margin="8,0" FontSize="12" />
+                <Button x:Name="DeleteButton" Grid.Column="3" Click="DeleteButton_Click" HorizontalAlignment="Right">
+                    <TextBlock Text="🗑️" />
+                </Button>
+            </Grid>
+            <StackPanel x:Name="ContentPanel" Margin="0,8,0,0">
+                <TextBlock Text="Channels:" Margin="0,4,0,0" />
+                <StackPanel x:Name="ChannelPanel" Orientation="Horizontal" />
+                <ContentPresenter x:Name="ParamPresenter" Margin="0,8,0,0" />
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</UserControl>

@@ -19,6 +19,8 @@ namespace ADC_Rec.Services
         private readonly object _lock = new object();
         private readonly float[] _channelGains = new float[Packet.NumChannels];
         private readonly float[] _channelPans = new float[Packet.NumChannels];
+        public List<Models.Filters.IFilter> Filters => _filters;
+        private readonly List<Models.Filters.IFilter> _filters = new List<Models.Filters.IFilter>();
 
         private WaveOutEvent? _waveOut;
         private BufferedWaveProvider? _playbackBuffer;
@@ -87,6 +89,13 @@ namespace ADC_Rec.Services
             lock (_lock) { _channelPans[ch] = pan; }
         }
 
+        public float[] GetChannelPansSnapshot()
+        {
+            var pans = new float[Packet.NumChannels];
+            lock (_lock) { Array.Copy(_channelPans, pans, Packet.NumChannels); }
+            return pans;
+        }
+
         public void SetDcBlockEnabled(bool enabled)
         {
             lock (_lock) { _dcBlockEnabled = enabled; }
@@ -114,12 +123,13 @@ namespace ADC_Rec.Services
             // Use SampleProvider to work with floats directly without manual byte conversion
             _playbackBuffer = new BufferedWaveProvider(monitorFormat)
             {
-                BufferLength = (InputSampleRate * OutputChannels * sizeof(float)) / 3,    
+                BufferLength = (InputSampleRate * OutputChannels * sizeof(float)) / 5,    
                 DiscardOnBufferOverflow = true
             };
 
             _waveOut = new WaveOutEvent();
-            _waveOut.Init(_playbackBuffer);
+            //_waveOut.DesiredLatency = 250;
+            _waveOut.Init(_playbackBuffer);            
             _waveOut.Play();
             _playbackStarted = true;
         }
@@ -194,32 +204,74 @@ namespace ADC_Rec.Services
 
             int sampleIdx = 0;
             var outputSamples = new List<float>();
+            
+            // Reusable buffers for filtering
+            float[] channelBuffers = new float[Packet.NumChannels];
+            float[] mixBuffer = new float[2]; // L, R
+
+            // Snapshot filters
+            List<Models.Filters.IFilter> activeFilters;
+            lock (_lock) { activeFilters = new List<Models.Filters.IFilter>(_filters); }
+
             foreach (var pkt in batchList)
             {
                 for (int i = 0; i < Packet.BufferLen; i++)
                 {
-                    float mixL = 0f;
-                    float mixR = 0f;
                     for (int ch = 0; ch < Packet.NumChannels; ch++)
                     {
                         uint raw = pkt.Samples[ch, i];
                         float sample = ConvertUnsignedToFloat(raw, 16);
-                        
                         if (dcEnabled) sample = ApplyAdaptiveDcBlock(sample, ch);
-                        
-                        float gain = gains[ch];
-                        // Save processed sample to batch before mixing (so plot shows gain)
-                        processedBatch[ch][sampleIdx] = sample * gain;
+                        channelBuffers[ch] = sample * gains[ch];
+                    }
 
+                    // Pre-mix filters (CH0-CH3)
+                    foreach (var filter in activeFilters)
+                    {
+                        if (filter.IsEnabled)
+                        {
+                            for (int ch = 0; ch < Packet.NumChannels; ch++)
+                            {
+                                if ((filter.Channels & (Models.Filters.ChannelBinding)(1 << ch)) != 0)
+                                {
+                                    channelBuffers[ch] = filter.Process(channelBuffers[ch], (Models.Filters.ChannelBinding)(1 << ch));
+                                }
+                            }
+                        }
+                    }
+
+                    // Mixing
+                    float mixL = 0f;
+                    float mixR = 0f;
+                    for (int ch = 0; ch < Packet.NumChannels; ch++)
+                    {
                         float pan = pans[ch];
                         float angle = (pan + 1f) * 0.25f * (float)Math.PI;
-                        float leftGain = (float)Math.Cos(angle);
-                        float rightGain = (float)Math.Sin(angle);
-                        mixL += sample * gain * leftGain;
-                        mixR += sample * gain * rightGain;
+                        mixL += channelBuffers[ch] * (float)Math.Cos(angle);
+                        mixR += channelBuffers[ch] * (float)Math.Sin(angle);
                     }
+                    mixBuffer[0] = mixL;
+                    mixBuffer[1] = mixR;
+
+                    // Post-mix filters (L, R)
+                    foreach (var filter in activeFilters)
+                    {
+                        if (filter.IsEnabled)
+                        {
+                            if ((filter.Channels & Models.Filters.ChannelBinding.L) != 0)
+                            {
+                                mixBuffer[0] = filter.Process(mixBuffer[0], Models.Filters.ChannelBinding.L);
+                            }
+                            if ((filter.Channels & Models.Filters.ChannelBinding.R) != 0)
+                            {
+                                mixBuffer[1] = filter.Process(mixBuffer[1], Models.Filters.ChannelBinding.R);
+                            }
+                        }
+                    }
+
+                    for (int ch = 0; ch < Packet.NumChannels; ch++) processedBatch[ch][sampleIdx] = channelBuffers[ch];
                     sampleIdx++;
-                    StoreMonitorSample(mixL, mixR, outputSamples);
+                    StoreMonitorSample(mixBuffer[0], mixBuffer[1], outputSamples);
                 }
             }
 

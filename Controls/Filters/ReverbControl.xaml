@@ -1,0 +1,46 @@
+<UserControl
+    x:Class="ADC_Rec.Controls.Filters.ReverbControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:ADC_Rec.Controls.Filters"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    d:DesignHeight="150"
+    d:DesignWidth="300">
+    <StackPanel Spacing="8">
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Room Size:" />
+                <TextBlock Text="{x:Bind ViewModel.RoomSize, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="0" Maximum="1" Value="{x:Bind ViewModel.RoomSize, Mode=TwoWay}" SmallChange="0.05" StepFrequency="0.05" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Damping:" />
+                <TextBlock Text="{x:Bind ViewModel.Damping, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="0" Maximum="1" Value="{x:Bind ViewModel.Damping, Mode=TwoWay}" SmallChange="0.05" StepFrequency="0.05" />
+        </StackPanel>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Wet Level:" />
+                <TextBlock Text="{x:Bind ViewModel.WetLevel, Mode=OneWay}" Grid.Column="1" HorizontalAlignment="Right" />
+            </Grid>
+            <Slider Minimum="0" Maximum="1" Value="{x:Bind ViewModel.WetLevel, Mode=TwoWay}" SmallChange="0.05" StepFrequency="0.05" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

@@ -1,28 +1,27 @@
 using System;
 using System.IO.Ports;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ADC_Rec.Services
 {
     public class SerialService : IDisposable
     {
-        private SerialPort? _port = null;
+        private SerialPort? _port;
+        private CancellationTokenSource? _cts;
         public event Action<byte[]>? DataReceived;
         public event Action<string>? LogMessage;
-
-        public string[] GetPortNames() => SerialPort.GetPortNames();
-
-        public bool IsConnected => _port?.IsOpen ?? false;
 
         public bool Connect(string portName, int baud = 115200)
         {
             try
             {
                 _port = new SerialPort(portName, baud);
-                _port.ReadTimeout = 500;
-                _port.WriteTimeout = 500;
-                _port.DataReceived += OnDataReceived;
                 _port.Open();
+
+                _cts = new CancellationTokenSource();
+                _ = Task.Run(() => ReadLoopAsync(_cts.Token));
+
                 LogMessage?.Invoke($"Connected to {portName} @ {baud}");
                 return true;
             }
@@ -33,16 +32,42 @@ namespace ADC_Rec.Services
             }
         }
 
+        private async Task ReadLoopAsync(CancellationToken token)
+        {
+            var stream = _port!.BaseStream;
+            byte[] buffer = new byte[4096];
+
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    int read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
+                    if (read > 0)
+                    {
+                        byte[] data = new byte[read];
+                        Buffer.BlockCopy(buffer, 0, data, 0, read);
+                        DataReceived?.Invoke(data);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    LogMessage?.Invoke($"Read error: {ex.Message}");
+                    break;
+                }
+            }
+        }
+
         public void Disconnect()
         {
             try
             {
-                if (_port != null)
-                {
-                    _port.DataReceived -= OnDataReceived;
-                    if (_port.IsOpen) _port.Close();
-                    LogMessage?.Invoke("Disconnected");
-                }
+                _cts?.Cancel();
+                _port?.Close();
+                LogMessage?.Invoke("Disconnected");
             }
             catch (Exception ex)
             {
@@ -50,36 +75,20 @@ namespace ADC_Rec.Services
             }
             finally
             {
+                _cts?.Dispose();
                 _port?.Dispose();
+                _cts = null;
                 _port = null;
             }
         }
 
-        private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
+        public void Dispose() => Disconnect();
+
+        public string[] GetPortNames()
         {
-            try
-            {
-                if (_port == null) return;
-                int toRead = _port.BytesToRead;
-                if (toRead > 0)
-                {
-                    byte[] buf = new byte[toRead];
-                    int read = _port.Read(buf, 0, toRead);
-                    if (read > 0)
-                    {
-                        DataReceived?.Invoke(buf);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                LogMessage?.Invoke($"Read error: {ex.Message}");
-            }
+            return SerialPort.GetPortNames();
         }
 
-        public void Dispose()
-        {
-            Disconnect();
-        }
+        public bool IsConnected => _port?.IsOpen ?? false;
     }
 }

@@ -43,7 +43,7 @@ namespace ADC_Rec
         private int _sampleRate = 44100; // default sample rate
         private bool _fitToData = true; // if true, autoscale to observed samples instead of full bit range
         private const int MaxPacketBatchPerTick = 64;
-        private const int MaxPacketQueue = 4096; // if exceeded, drop oldest packets to keep memory bounded
+        private const int MaxPacketQueue = 512; // if exceeded, drop oldest packets to keep memory bounded
         private int _lastLogFlushTick = Environment.TickCount;
         private const int LogFlushMs = 500;
 
@@ -63,7 +63,7 @@ namespace ADC_Rec
         private int _lastDrainTick = 0;
         private bool _drainStartedLogged = false;
         private bool _drainIdleLogged = false;
-        private const int DrainBatchSize = 256;
+        private const int DrainBatchSize = 8;
         private const int DrainIdleMs = 1;
         private const int DrainHighWaterMark = MaxPacketQueue;
         private const int DrainTargetQueue = MaxPacketQueue / 2;
@@ -103,17 +103,26 @@ namespace ADC_Rec
         private readonly Line[] _channelBaselines = new Line[Models.Packet.NumChannels];
         private readonly Ellipse[] _channelDots = new Ellipse[Models.Packet.NumChannels];
         private readonly PointCollection[] _channelPoints = new PointCollection[Models.Packet.NumChannels];
-        
+
         // Track if drawing objects have been initialized
         private bool _drawingObjectsInitialized = false;
-        
+
         // Track log text length to avoid rebuilding entire string
         private int _logTextLength = 0;
         private const int MaxLogChars = 200000;
         private const int TrimLogChars = 50000; // Trim this many chars when limit reached
 
-        // UI enable/disable for maximum performance mode
-        private bool _uiEnabled = true;
+        // Refresh rate control (replaces UI enabled/disabled)
+        private enum RefreshRate
+        {
+            Hz20 = 50,    // 20Hz (50ms)
+            Hz5 = 200,     // 5Hz (200ms)
+            Hz1 = 1000,    // 1Hz (1000ms)
+            Disabled = 0   // 0Hz (no updates)
+        }
+
+        private RefreshRate _currentRefreshRate = RefreshRate.Hz20;
+        private int _uiTimerInterval = 50; // Default to 20Hz
 
         public MainWindow()
         {
@@ -163,12 +172,13 @@ namespace ADC_Rec
                 VerboseCheckbox.Unchecked += (s, e) => { _parser.Verbose = false; _logQueue.Enqueue("Verbose OFF"); };
             }
 
-            // UI enabled checkbox hookup (if exists) - disables UI for max performance
-            if (UiEnabledCheck != null)
+            // Refresh rate radio buttons hookup
+            if (Refresh20Hz != null && Refresh5Hz != null && Refresh1Hz != null && Refresh0Hz != null)
             {
-                UiEnabledCheck.IsChecked = _uiEnabled;
-                UiEnabledCheck.Checked += (s, e) => { _uiEnabled = true; _logQueue.Enqueue("UI: ON"); };
-                UiEnabledCheck.Unchecked += (s, e) => { _uiEnabled = false; _logQueue.Enqueue("UI: OFF (max performance)"); };
+                Refresh20Hz.Checked += RefreshRate_Checked;
+                Refresh5Hz.Checked += RefreshRate_Checked;
+                Refresh1Hz.Checked += RefreshRate_Checked;
+                Refresh0Hz.Checked += RefreshRate_Checked;
             }
 
             // Show hover/last-value labels all the time (initialize)
@@ -218,7 +228,8 @@ namespace ADC_Rec
 
         private void ForceRedraw()
         {
-            _ = DispatcherQueue.TryEnqueue(() => {
+            _ = DispatcherQueue.TryEnqueue(() =>
+            {
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
@@ -273,15 +284,13 @@ namespace ADC_Rec
             _parser.Feed(data);
         }
 
-
-
         private void Parser_PacketParsed(Models.Packet pkt)
         {
             // Enqueue packets quickly for batch processing by background drain
             _packetQueue.Enqueue(pkt);
             System.Threading.Interlocked.Increment(ref _pendingPacketCount);
 
-                    // Track parsed bytes per channel (each sample is 2 bytes)
+            // Track parsed bytes per channel (each sample is 2 bytes)
             for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
             {
                 System.Threading.Interlocked.Add(ref _bytesPerChannel[ch], Models.Packet.BufferLen * 2);
@@ -324,49 +333,63 @@ namespace ADC_Rec
             catch { }
         }
 
+        private bool _isProcessing = false; // to prevent reentrancy in ProcessPendingPackets
         private void ProcessPendingPackets()
         {
-            // UI refresh only; background drain feeds the plot manager at full speed
-            if (!_running && !_replaying) return;
-
-            // If UI is disabled, skip all UI rendering but keep the timer running for drain to continue
-            if (!_uiEnabled) return;
-
-            // trigger single UI update (fill display buffers then draw) and flush logs occasionally
-            _ = DispatcherQueue.TryEnqueue(() =>
+            if (_isProcessing)
             {
-                bool anyDrawn = false;
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                return; // prevent reentrancy if processing takes longer than timer interval
+            }
+            try
+            {
+                _isProcessing = true;
+
+                // UI refresh only; background drain feeds the plot manager at full speed
+                if (!_running && !_replaying) return;
+
+                // If UI refresh is disabled, skip all UI rendering but keep the timer running for drain to continue
+                if (_currentRefreshRate == RefreshRate.Disabled) return;
+
+                // trigger single UI update (fill display buffers then draw) and flush logs occasionally
+                _ = DispatcherQueue.TryEnqueue(() =>
                 {
-                    int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
-                    // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
-                    DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
-                    if (n > 0) anyDrawn = true;
-                }
+                    bool anyDrawn = false;
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    {
+                        int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
+                        var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                        // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
+                        DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
+                        if (n > 0) anyDrawn = true;
+                    }
 
-                // Update per-channel latest raw sample display (always show most recent sample as hex)
-                for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
-                {
-                    var tmpRaw = new uint[1];
-                    int a = _plotManager.FillChannelRawSnapshot(ch, tmpRaw, 1);
-                    string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({ConvertRawToUnsigned(tmpRaw[0])})" : "<no data>";
-                    if (ch == 0) HoverText0.Text = txt;
-                    else if (ch == 1) HoverText1.Text = txt;
-                    else if (ch == 2) HoverText2.Text = txt;
-                    else HoverText3.Text = txt;
-                }
+                    // Update per-channel latest raw sample display (always show most recent sample as hex)
+                    for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
+                    {
+                        var tmpRaw = new uint[1];
+                        int a = _plotManager.FillChannelRawSnapshot(ch, tmpRaw, 1);
+                        string txt = a == 1 ? $"0x{tmpRaw[0]:X6} ({ConvertRawToUnsigned(tmpRaw[0])})" : "<no data>";
+                        if (ch == 0) HoverText0.Text = txt;
+                        else if (ch == 1) HoverText1.Text = txt;
+                        else if (ch == 2) HoverText2.Text = txt;
+                        else HoverText3.Text = txt;
+                    }
 
-                if (!anyDrawn)
-                {
-                    // Avoid spamming logs. Update on-screen diagnostics so you can inspect counts without flooding the log.
-                    UpdateBytesUi();
-                }
+                    if (!anyDrawn)
+                    {
+                        // Avoid spamming logs. Update on-screen diagnostics so you can inspect counts without flooding the log.
+                        UpdateBytesUi();
+                    }
 
-                UpdateMeterUi();
+                    UpdateMeterUi();
 
-                if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
-            });
+                    if (Environment.TickCount - _lastLogFlushTick >= LogFlushMs) FlushLogsAndUpdateQueueStatus();
+                });
+            }
+            finally
+            {
+                _isProcessing = false;
+            }
         }
 
         private void UpdateMeterUi()
@@ -380,10 +403,10 @@ namespace ADC_Rec
                 UpdateMeterRect(_meterRightRects[i], right[i], i);
             }
 
-            if (PeakHoldLeftBar != null) PeakHoldLeftBar.Value = _audioMixService.PeakHoldLeft;
-            if (PeakHoldRightBar != null) PeakHoldRightBar.Value = _audioMixService.PeakHoldRight;
-            if (AvgHoldLeftBar != null) AvgHoldLeftBar.Value = _audioMixService.AvgHoldLeft;
-            if (AvgHoldRightBar != null) AvgHoldRightBar.Value = _audioMixService.AvgHoldRight;
+            //if (PeakHoldLeftBar != null) PeakHoldLeftBar.Value = _audioMixService.PeakHoldLeft;
+            //if (PeakHoldRightBar != null) PeakHoldRightBar.Value = _audioMixService.PeakHoldRight;
+            //if (AvgHoldLeftBar != null) AvgHoldLeftBar.Value = _audioMixService.AvgHoldLeft;
+            //if (AvgHoldRightBar != null) AvgHoldRightBar.Value = _audioMixService.AvgHoldRight;
         }
 
         private void UpdateMeterRect(Rectangle rect, float lit, int index)
@@ -500,7 +523,45 @@ namespace ADC_Rec
         private void StartUiTimer()
         {
             if (_uiTimer != null) return; // already running
-            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, 50); // ~20Hz to reduce UI load
+            _uiTimer = new Timer(_ => ProcessPendingPackets(), null, 0, _uiTimerInterval);
+        }
+
+        private void RefreshRate_Checked(object sender, RoutedEventArgs e)
+        {
+            var radioButton = sender as RadioButton;
+            if (radioButton == null) return;
+
+            if (radioButton == Refresh20Hz)
+            {
+                _currentRefreshRate = RefreshRate.Hz20;
+                _uiTimerInterval = (int)RefreshRate.Hz20;
+                _logQueue.Enqueue("Refresh rate: 20Hz (smooth)");
+            }
+            else if (radioButton == Refresh5Hz)
+            {
+                _currentRefreshRate = RefreshRate.Hz5;
+                _uiTimerInterval = (int)RefreshRate.Hz5;
+                _logQueue.Enqueue("Refresh rate: 5Hz (balanced)");
+            }
+            else if (radioButton == Refresh1Hz)
+            {
+                _currentRefreshRate = RefreshRate.Hz1;
+                _uiTimerInterval = (int)RefreshRate.Hz1;
+                _logQueue.Enqueue("Refresh rate: 1Hz (economy)");
+            }
+            else if (radioButton == Refresh0Hz)
+            {
+                _currentRefreshRate = RefreshRate.Disabled;
+                _uiTimerInterval = (int)RefreshRate.Disabled;
+                _logQueue.Enqueue("Refresh rate: Disabled (max performance)");
+            }
+
+            // Restart timer with new interval if it's running
+            if (_uiTimer != null)
+            {
+                StopUiTimer();
+                StartUiTimer();
+            }
         }
 
         private void StopUiTimer()
@@ -584,25 +645,25 @@ namespace ADC_Rec
                     _drainIdleLogged = false;
                     System.Threading.Interlocked.Increment(ref _drainLoopIterations);
                     int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
-                    if (!_recording && queueCount >= DrainHighWaterMark)
-                    {
-                        int toDrop = Math.Max(0, queueCount - DrainTargetQueue);
-                        int dropped = 0;
-                        for (int i = 0; i < toDrop; i++)
-                        {
-                            if (_packetQueue.TryDequeue(out _))
-                            {
-                                System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
-                                dropped++;
-                            }
-                            else break;
-                        }
-                        if (dropped > 0)
-                        {
-                            System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
-                            System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
-                        }
-                    }
+                    //if (!_recording && queueCount >= DrainHighWaterMark)
+                    //{
+                    //    int toDrop = Math.Max(0, queueCount - DrainTargetQueue);
+                    //    int dropped = 0;
+                    //    for (int i = 0; i < toDrop; i++)
+                    //    {
+                    //        if (_packetQueue.TryDequeue(out _))
+                    //        {
+                    //            System.Threading.Interlocked.Decrement(ref _pendingPacketCount);
+                    //            dropped++;
+                    //        }
+                    //        else break;
+                    //    }
+                    //    if (dropped > 0)
+                    //    {
+                    //        System.Threading.Interlocked.Add(ref _droppedPacketCount, dropped);
+                    //        System.Threading.Interlocked.Add(ref _dropLogAccumulator, dropped);
+                    //    }
+                    //}
                     var batch = new List<Models.Packet>(DrainBatchSize);
                     for (int i = 0; i < DrainBatchSize; i++)
                     {
@@ -615,17 +676,17 @@ namespace ADC_Rec
                     }
                     _lastDrainBatchCount = batch.Count;
                     _lastDrainTick = Environment.TickCount;
-            if (batch.Count == 0)
-            {
-                await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
-                continue;
-            }
+                    if (batch.Count == 0)
+                    {
+                        //await System.Threading.Tasks.Task.Delay(DrainIdleMs, token).ConfigureAwait(false);
+                        continue;
+                    }
 
-            // Process samples in the DrainLoop before sending to PlotManager and AudioMixService
-            _audioMixService.ProcessAndPlotPackets(batch, _plotManager);
+                    // Process samples in the DrainLoop before sending to PlotManager and AudioMixService
+                    _audioMixService.ProcessAndPlotPackets(batch, _plotManager);
 
-            // Track processed packets for diagnostics
-            System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
+                    // Track processed packets for diagnostics
+                    System.Threading.Interlocked.Add(ref _processedPacketCount, batch.Count);
 
                     // If recording, write raw packets to disk (header + payload)
                     if (_recording)
@@ -699,7 +760,7 @@ namespace ADC_Rec
                 if (h <= 0) h = canvas.Height > 0 ? canvas.Height : 140;
 
                 float min, max;
-                
+
                 // Processed samples are floats in range [-1, 1], centered around 0
                 // Fit-to-data logic for [-1, 1] data:
                 if (_fitToData)
@@ -726,7 +787,7 @@ namespace ADC_Rec
                     max = 1.0f;
                 }
                 float range = max - min;
-                if (range <= 0f) range = 1f; 
+                if (range <= 0f) range = 1f;
 
                 int n = length;
                 int pixelWidth = (int)w;
@@ -957,6 +1018,7 @@ namespace ADC_Rec
 
         private void UpdateBytesUi()
         {
+            
             try
             {
                 long parsedPkts = _parser?.ParsedPacketCount ?? 0;
@@ -976,7 +1038,7 @@ namespace ADC_Rec
                 long dropped = System.Threading.Interlocked.Add(ref _droppedPacketCount, 0);
                 long processed = System.Threading.Interlocked.Add(ref _processedPacketCount, 0);
                 int queueCount = System.Threading.Interlocked.Add(ref _pendingPacketCount, 0);
-                    // collect per-channel snapshot counts and maximums for diagnostics
+                // collect per-channel snapshot counts and maximums for diagnostics
                 var sbDiag = new System.Text.StringBuilder();
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
@@ -1094,6 +1156,47 @@ namespace ADC_Rec
             }
         }
 
+        private async void SaveConfigButton_Click(object sender, RoutedEventArgs e)
+        {
+            var picker = new Windows.Storage.Pickers.FileSavePicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeChoices.Add("JSON", new List<string> { ".json" });
+            picker.SuggestedFileName = "config";
+            var file = await picker.PickSaveFileAsync();
+            if (file != null)
+            {
+                Services.ConfigService.SaveConfig(file.Path, _audioMixService);
+                AddLog($"Config saved to {file.Path}");
+            }
+        }
+
+        private async void LoadConfigButton_Click(object sender, RoutedEventArgs e)
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeFilter.Add(".json");
+            var file = await picker.PickSingleFileAsync();
+            if (file != null)
+            {
+                Services.ConfigService.LoadConfig(file.Path, _audioMixService);
+
+                FiltersRack.Children.Clear();
+                foreach (var filter in _audioMixService.Filters)
+                {
+                    var control = new Controls.Filters.FilterCardControl(filter);
+                    control.DeleteRequested += (s, ctrl) =>
+                    {
+                        FiltersRack.Children.Remove(ctrl);
+                        _audioMixService.Filters.Remove(ctrl.Filter);
+                    };
+                    FiltersRack.Children.Add(control);
+                }
+                AddLog($"Config loaded from {file.Path}");
+            }
+        }
+
         private CancellationTokenSource? _replayCts;
 
         private async void ReplayButton_Click(object sender, RoutedEventArgs e)
@@ -1140,7 +1243,7 @@ namespace ADC_Rec
 
                 string path = file.Path;
                 AddLog($"Replaying {path}");
-                
+
                 // Create cancellation token for this replay
                 _replayCts = new CancellationTokenSource();
                 var token = _replayCts.Token;
@@ -1153,29 +1256,30 @@ namespace ADC_Rec
                     _audioMixService?.StartPlayback();
                 }
                 _replaying = true;
-                System.Threading.Tasks.Task.Run(async () =>
+                _ = System.Threading.Tasks.Task.Run(async () =>
                 {
                     try
                     {
                         int pktLen = 2 + Models.Packet.NumChannels * Models.Packet.BufferLen * 2;
                         using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
                         var buf = new byte[pktLen];
-                        
+
                         // Calculate packets per second for real-time pacing
                         // Each packet has BufferLen (8) samples per channel, 4 channels = 32 raw samples
                         // After mixing to stereo: BufferLen (8) samples × 2 channels = 16 stereo samples
                         // At 44100 Hz: 44100 / 16 = 2756 packets per second for 1 second of audio
-                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * 2);
+                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * Models.Packet.NumChannels);
                         // Use batch size that gives us reasonable delay intervals (e.g., 50ms worth)
-                        int batchSize = Math.Max(1, packetsPerSecond / 20); // 1/20 second worth = ~138 packets
-                        
+                        int batchSize = (int)Math.Max(1, packetsPerSecond * 0.2);
+
                         while (!token.IsCancellationRequested)
                         {
+                            var now = DateTime.Now;
                             // Read a batch of packets
                             for (int i = 0; i < batchSize; i++)
                             {
                                 int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
-                                if (read < pktLen) 
+                                if (read < pktLen)
                                 {
                                     // Final few packets - process them and exit
                                     if (read > 0) _parser.Feed(buf);
@@ -1183,14 +1287,17 @@ namespace ADC_Rec
                                 }
                                 _parser.Feed(buf);
                             }
-                            
+
                             // Check if we've reached end of file
                             if (fs.Position >= fs.Length) break;
-                            
+
                             // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
                             // Use _rateRatioSmoothed to match what's displayed on screen
-                            int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
-                            await System.Threading.Tasks.Task.Delay(delayMs).ConfigureAwait(false);
+                            //int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
+                            //we need to feed batchSize every 20ms to match the processing in the drain loop, so calculate delay based on actual batch size and packets per second
+                            var howLong = DateTime.Now.Subtract(now).TotalMilliseconds;
+                            var delayMs = howLong > 40 ? 14: 40 - howLong;
+                            await System.Threading.Tasks.Task.Delay((int)delayMs).ConfigureAwait(false);
                         }
                         _logQueue.Enqueue($"Replay finished: {path}");
                     }
@@ -1288,7 +1395,8 @@ namespace ADC_Rec
             StopUiTimer();
             StopCountersTimer();
             // stop recording if active
-            if (_recording) {
+            if (_recording)
+            {
                 lock (_recordLock) { try { _recordWriter?.Dispose(); } catch { } _recordWriter = null; }
                 _recording = false;
                 _audioMixService.StopWavWrite();
@@ -1298,6 +1406,54 @@ namespace ADC_Rec
             AddLog("Capture stopped");
             StatusTextBlock.Text = "Stopped";
             _audioMixService?.StopPlayback();
+        }
+
+        private void AddFilterButton_Click(object sender, RoutedEventArgs e)
+        {
+            var menu = new MenuFlyout();
+            var types = new[] {
+                (Models.Filters.FilterType.PeakingEQ, "Peaking EQ"),
+                (Models.Filters.FilterType.LowShelf, "Low Shelf"),
+                (Models.Filters.FilterType.HighShelf, "High Shelf"),
+                (Models.Filters.FilterType.Compressor, "Compressor"),
+                (Models.Filters.FilterType.NoiseSuppression, "Noise Suppression"),
+                (Models.Filters.FilterType.Reverb, "Reverb"),
+                (Models.Filters.FilterType.Delay, "Delay"),
+                (Models.Filters.FilterType.Phase, "Phase")
+            };
+
+            foreach (var type in types)
+            {
+                var item = new MenuFlyoutItem { Text = type.Item2 };
+                item.Click += (s, ev) => AddFilter(type.Item1);
+                menu.Items.Add(item);
+            }
+            menu.ShowAt(AddFilterButton);
+        }
+
+        private void AddFilter(Models.Filters.FilterType type)
+        {
+            Models.Filters.IFilter filter = type switch
+            {
+                Models.Filters.FilterType.PeakingEQ => new Models.Filters.PeakingEQFilter(),
+                Models.Filters.FilterType.LowShelf => new Models.Filters.ShelfFilter(true),
+                Models.Filters.FilterType.HighShelf => new Models.Filters.ShelfFilter(false),
+                Models.Filters.FilterType.Compressor => new Models.Filters.CompressorFilter(),
+                Models.Filters.FilterType.NoiseSuppression => new Models.Filters.NoiseSuppressionFilter(),
+                Models.Filters.FilterType.Reverb => new Models.Filters.ReverbFilter(),
+                Models.Filters.FilterType.Delay => new Models.Filters.DelayFilter(),
+                Models.Filters.FilterType.Phase => new Models.Filters.PhaseFilter(),
+                _ => throw new ArgumentOutOfRangeException()
+            };
+
+            var control = new Controls.Filters.FilterCardControl(filter);
+            _audioMixService.Filters.Add(filter);
+            control.DeleteRequested += (s, ctrl) =>
+            {
+                FiltersRack.Children.Remove(ctrl);
+                _audioMixService.Filters.Remove(ctrl.Filter);
+            };
+            FiltersRack.Children.Add(control);
         }
     }
 }
