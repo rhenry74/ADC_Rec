@@ -20,18 +20,18 @@ namespace ADC_Rec.Services
         public class AppConfig
         {
             public List<FilterConfig> Filters { get; set; } = new List<FilterConfig>();
-            public float[] Gains { get; set; } = new float[4];
-            public float[] Pans { get; set; } = new float[4];
+            public float[] Gains { get; set; } = new float[6];
+            public float[] Pans { get; set; } = new float[6];
         }
 
         public static void SaveConfig(string filePath, AudioMixService audioService)
         {
             var config = new AppConfig();
             var gains = audioService.GetChannelGainsSnapshot();
-            Array.Copy(gains, config.Gains, 4);
+            Array.Copy(gains, config.Gains, 6);
 
             var pans = audioService.GetChannelPansSnapshot();
-            Array.Copy(pans, config.Pans, 4);
+            Array.Copy(pans, config.Pans, 6);
             
             foreach (var filter in audioService.Filters)
             {
@@ -68,7 +68,7 @@ namespace ADC_Rec.Services
             var config = JsonSerializer.Deserialize<AppConfig>(json);
             if (config == null) return;
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 6; i++)
             {
                 audioService.SetChannelGain(i, config.Gains[i]);
                 audioService.SetChannelPan(i, config.Pans[i]);

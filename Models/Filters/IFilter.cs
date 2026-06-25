@@ -22,8 +22,10 @@ namespace ADC_Rec.Models.Filters
         CH1 = 1 << 1,
         CH2 = 1 << 2,
         CH3 = 1 << 3,
-        L = 1 << 4,
-        R = 1 << 5
+        CH4 = 1 << 4,
+        CH5 = 1 << 5,
+        L = 1 << 6,
+        R = 1 << 7
     }
 
     public interface IFilter

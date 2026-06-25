@@ -10,7 +10,19 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <!-- Other merged dictionaries here -->
             </ResourceDictionary.MergedDictionaries>
-            <!-- Other app resources here -->
+            <!-- Scrollbar styling: wider and blue to pop -->
+            <x:Double x:Key="ScrollBarTrackSize">14</x:Double>
+            <x:Double x:Key="ScrollBarThickness">14</x:Double>
+            <SolidColorBrush x:Key="ScrollBarTrackFill" Color="#2B2B2B" />
+            <SolidColorBrush x:Key="ScrollBarTrackFillPointerOver" Color="#3B3B3B" />
+            <SolidColorBrush x:Key="ScrollBarTrackFillPressed" Color="#4B4B4B" />
+            <SolidColorBrush x:Key="ScrollBarTrackFillDisabled" Color="#2B2B2B" />
+            <SolidColorBrush x:Key="ScrollBarThumbFill" Color="#4A90D9" />
+            <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="#5BA0E9" />
+            <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#2B70B9" />
+            <SolidColorBrush x:Key="ScrollBarThumbFillDisabled" Color="#555555" />
+            <SolidColorBrush x:Key="ScrollBarArrowFill" Color="#4A90D9" />
+            <SolidColorBrush x:Key="ScrollBarArrowFillPointerOver" Color="#5BA0E9" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

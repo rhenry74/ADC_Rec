@@ -225,16 +225,17 @@ namespace ADC_Rec.Services
                         channelBuffers[ch] = sample * gains[ch];
                     }
 
-                    // Pre-mix filters (CH0-CH3)
+                    // Pre-mix filters
                     foreach (var filter in activeFilters)
                     {
                         if (filter.IsEnabled)
                         {
                             for (int ch = 0; ch < Packet.NumChannels; ch++)
                             {
-                                if ((filter.Channels & (Models.Filters.ChannelBinding)(1 << ch)) != 0)
+                                var chBinding = GetChannelBindingForIndex(ch);
+                                if ((filter.Channels & chBinding) != 0)
                                 {
-                                    channelBuffers[ch] = filter.Process(channelBuffers[ch], (Models.Filters.ChannelBinding)(1 << ch));
+                                    channelBuffers[ch] = filter.Process(channelBuffers[ch], chBinding);
                                 }
                             }
                         }
@@ -442,6 +443,20 @@ namespace ADC_Rec.Services
             writer.Write((int)fileSize);
             writer.Seek(40, SeekOrigin.Begin);
             writer.Write((int)dataBytes);
+        }
+
+        private static Models.Filters.ChannelBinding GetChannelBindingForIndex(int ch)
+        {
+            return ch switch
+            {
+                0 => Models.Filters.ChannelBinding.CH0,
+                1 => Models.Filters.ChannelBinding.CH1,
+                2 => Models.Filters.ChannelBinding.CH2,
+                3 => Models.Filters.ChannelBinding.CH3,
+                4 => Models.Filters.ChannelBinding.CH4,
+                5 => Models.Filters.ChannelBinding.CH5,
+                _ => Models.Filters.ChannelBinding.None
+            };
         }
 
         public void Dispose()

@@ -188,6 +188,8 @@ namespace ADC_Rec
                 if (HoverText1 != null) { HoverText1.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText1.Text = "<no data>"; }
                 if (HoverText2 != null) { HoverText2.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText2.Text = "<no data>"; }
                 if (HoverText3 != null) { HoverText3.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText3.Text = "<no data>"; }
+                if (HoverText4 != null) { HoverText4.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText4.Text = "<no data>"; }
+                if (HoverText5 != null) { HoverText5.Visibility = Microsoft.UI.Xaml.Visibility.Visible; HoverText5.Text = "<no data>"; }
             }
             catch { }
 
@@ -218,8 +220,8 @@ namespace ADC_Rec
         {
             var rect = new Rectangle
             {
-                Width = 24,
-                Height = 8,
+                Width = 12,
+                Height = 4,
                 Fill = new SolidColorBrush(Microsoft.UI.Colors.DarkGreen),
                 Margin = new Thickness(0, 1, 0, 1)
             };
@@ -233,7 +235,7 @@ namespace ADC_Rec
                 for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                 {
                     int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                    var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                    var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : ch == 3 ? WaveCanvas3 : ch == 4 ? WaveCanvas4 : WaveCanvas5;
                     DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
                 }
             });
@@ -357,7 +359,7 @@ namespace ADC_Rec
                     for (int ch = 0; ch < Models.Packet.NumChannels; ch++)
                     {
                         int n = _plotManager.FillChannelSnapshot(ch, _displayBuffers[ch], _displayWindowSamples);
-                        var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : WaveCanvas3;
+                        var canvas = ch == 0 ? WaveCanvas0 : ch == 1 ? WaveCanvas1 : ch == 2 ? WaveCanvas2 : ch == 3 ? WaveCanvas3 : ch == 4 ? WaveCanvas4 : WaveCanvas5;
                         // Pass 1.0f as scale because data in PlotManager is now already gain-adjusted
                         DrawChannel(canvas, _displayBuffers[ch], n, 1.0f);
                         if (n > 0) anyDrawn = true;
@@ -372,7 +374,9 @@ namespace ADC_Rec
                         if (ch == 0) HoverText0.Text = txt;
                         else if (ch == 1) HoverText1.Text = txt;
                         else if (ch == 2) HoverText2.Text = txt;
-                        else HoverText3.Text = txt;
+                        else if (ch == 3) HoverText3.Text = txt;
+                        else if (ch == 4) HoverText4.Text = txt;
+                        else HoverText5.Text = txt;
                     }
 
                     if (!anyDrawn)
@@ -954,6 +958,8 @@ namespace ADC_Rec
                 txt += "\r\n" + (HoverText1?.Text ?? "");
                 txt += "\r\n" + (HoverText2?.Text ?? "");
                 txt += "\r\n" + (HoverText3?.Text ?? "");
+                txt += "\r\n" + (HoverText4?.Text ?? "");
+                txt += "\r\n" + (HoverText5?.Text ?? "");
                 var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
                 dp.SetText(txt);
                 Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
@@ -980,6 +986,8 @@ namespace ADC_Rec
             else if (combo == MaxGainCombo1) targetSlider = GainSlider1;
             else if (combo == MaxGainCombo2) targetSlider = GainSlider2;
             else if (combo == MaxGainCombo3) targetSlider = GainSlider3;
+            else if (combo == MaxGainCombo4) targetSlider = GainSlider4;
+            else if (combo == MaxGainCombo5) targetSlider = GainSlider5;
 
             if (targetSlider != null)
             {
@@ -1001,6 +1009,8 @@ namespace ADC_Rec
             else if (slider == GainSlider1) { _audioMixService.SetChannelGain(1, gain); GainText1.Text = $"{gain:0.00}x"; }
             else if (slider == GainSlider2) { _audioMixService.SetChannelGain(2, gain); GainText2.Text = $"{gain:0.00}x"; }
             else if (slider == GainSlider3) { _audioMixService.SetChannelGain(3, gain); GainText3.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider4) { _audioMixService.SetChannelGain(4, gain); GainText4.Text = $"{gain:0.00}x"; }
+            else if (slider == GainSlider5) { _audioMixService.SetChannelGain(5, gain); GainText5.Text = $"{gain:0.00}x"; }
         }
 
         private void PanSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
@@ -1014,6 +1024,8 @@ namespace ADC_Rec
             else if (slider == PanSlider1) { _audioMixService.SetChannelPan(1, pan); PanText1.Text = panText; }
             else if (slider == PanSlider2) { _audioMixService.SetChannelPan(2, pan); PanText2.Text = panText; }
             else if (slider == PanSlider3) { _audioMixService.SetChannelPan(3, pan); PanText3.Text = panText; }
+            else if (slider == PanSlider4) { _audioMixService.SetChannelPan(4, pan); PanText4.Text = panText; }
+            else if (slider == PanSlider5) { _audioMixService.SetChannelPan(5, pan); PanText5.Text = panText; }
         }
 
         private void UpdateBytesUi()
@@ -1338,7 +1350,7 @@ namespace ADC_Rec
 
             // clear logs queue and UI
             while (_logQueue.TryDequeue(out _)) { }
-            _ = DispatcherQueue.TryEnqueue(() => { LogTextBox.Text = string.Empty; QueueTextBlock.Text = "Queue: 0"; BytesTextBlock.Text = "Bytes: ch0=0 ch1=0 ch2=0 ch3=0"; WaveCanvas0.Children.Clear(); WaveCanvas1.Children.Clear(); WaveCanvas2.Children.Clear(); WaveCanvas3.Children.Clear(); });
+            _ = DispatcherQueue.TryEnqueue(() => { LogTextBox.Text = string.Empty; QueueTextBlock.Text = "Queue: 0"; BytesTextBlock.Text = "Bytes: ch0=0 ch1=0 ch2=0 ch3=0 ch4=0 ch5=0"; WaveCanvas0.Children.Clear(); WaveCanvas1.Children.Clear(); WaveCanvas2.Children.Clear(); WaveCanvas3.Children.Clear(); WaveCanvas4.Children.Clear(); WaveCanvas5.Children.Clear(); });
             AddLog("Cleared display, logs, and counters");
         }
 
