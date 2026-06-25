@@ -1,5 +1,4 @@
-<img width="1906" height="1063" alt="image" src="https://github.com/user-attachments/assets/7e5a0c2c-ef96-4928-ad1a-68a94b9c6b3f" />
-
+<img width="1928" height="1278" alt="image" src="https://github.com/user-attachments/assets/ee5e48be-42ad-4dc2-af6a-3ee44dd6242a" />
 
 # ADC_Rec — Data Flow Architecture
 
