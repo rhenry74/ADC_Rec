@@ -10,6 +10,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +28,12 @@ namespace ADC_Rec
     /// </summary>
     public sealed partial class MainWindow : Window
     {
+        [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+        private static extern uint TimeBeginPeriod(uint period);
+
+        [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+        private static extern uint TimeEndPeriod(uint period);
+
         private Services.SerialService _serialService;
         private Services.Parser _parser;
         private Managers.PlotManager _plotManager;
@@ -193,6 +200,9 @@ namespace ADC_Rec
             }
             catch { }
 
+            // Set 1ms Windows timer resolution for accurate Task.Delay timing
+            try { TimeBeginPeriod(1); } catch { }
+
             this.Activated += MainWindow_Activated;
             this.Closed += MainWindow_Closed;
         }
@@ -257,6 +267,7 @@ namespace ADC_Rec
             _serialService?.Dispose();
             _audioMixService?.Dispose();
             try { _counterTimer?.Change(Timeout.Infinite, Timeout.Infinite); _counterTimer?.Dispose(); _counterTimer = null; } catch { }
+            try { TimeEndPeriod(1); } catch { }
         }
 
         private void RefreshPorts()
@@ -1276,40 +1287,36 @@ namespace ADC_Rec
                         using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read);
                         var buf = new byte[pktLen];
 
-                        // Calculate packets per second for real-time pacing
-                        // Each packet has BufferLen (8) samples per channel, 4 channels = 32 raw samples
-                        // After mixing to stereo: BufferLen (8) samples × 2 channels = 16 stereo samples
-                        // At 44100 Hz: 44100 / 16 = 2756 packets per second for 1 second of audio
-                        int packetsPerSecond = _sampleRate / (Models.Packet.BufferLen * Models.Packet.NumChannels);
-                        // Use batch size that gives us reasonable delay intervals (e.g., 50ms worth)
-                        int batchSize = (int)Math.Max(1, packetsPerSecond * 0.2);
+                        // Each packet produces BufferLen stereo frames of audio.
+                        // Batch ~40ms of audio. With TimeBeginPeriod(1) called at startup,
+                        // Task.Delay has 1ms resolution — no more 15.6ms overshoot.
+                        // Stopwatch provides microsecond precision for measuring read time.
+                        int batchSize = (int)(_sampleRate * 0.040 / Models.Packet.BufferLen);
+                        double targetMs = batchSize * Models.Packet.BufferLen * 1000.0 / _sampleRate;
+                        var sw = new System.Diagnostics.Stopwatch();
 
                         while (!token.IsCancellationRequested)
                         {
-                            var now = DateTime.Now;
-                            // Read a batch of packets
+                            sw.Restart();
+
+                            // Read exactly one batch of packets
                             for (int i = 0; i < batchSize; i++)
                             {
                                 int read = await fs.ReadAsync(buf, 0, pktLen).ConfigureAwait(false);
                                 if (read < pktLen)
                                 {
-                                    // Final few packets - process them and exit
                                     if (read > 0) _parser.Feed(buf);
                                     break;
                                 }
                                 _parser.Feed(buf);
                             }
-
-                            // Check if we've reached end of file
                             if (fs.Position >= fs.Length) break;
 
-                            // Adaptive delay: 15ms if rate < 100%, 16ms if rate >= 100%
-                            // Use _rateRatioSmoothed to match what's displayed on screen
-                            //int delayMs = _rateRatioSmoothed > 0 && _rateRatioSmoothed < 0.98 ? 15 : 16;
-                            //we need to feed batchSize every 20ms to match the processing in the drain loop, so calculate delay based on actual batch size and packets per second
-                            var howLong = DateTime.Now.Subtract(now).TotalMilliseconds;
-                            var delayMs = howLong > 40 ? 14: 40 - howLong;
-                            await System.Threading.Tasks.Task.Delay((int)delayMs).ConfigureAwait(false);
+                            // Pace precisely: wait remaining time in this batch's audio window
+                            // +1ms fudge compensates for read time and Task.Delay integer rounding
+                            double remaining = targetMs - sw.Elapsed.TotalMilliseconds + 1.0;
+                            if (remaining > 1.0)
+                                await System.Threading.Tasks.Task.Delay((int)remaining, token).ConfigureAwait(false);
                         }
                         _logQueue.Enqueue($"Replay finished: {path}");
                     }
